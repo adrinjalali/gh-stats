@@ -1,0 +1,23 @@
+[project]
+authors = ["adrinjalali <adrin.jalali@gmail.com>"]
+channels = ["conda-forge"]
+name = "all-hands"
+version = "0.1.0"
+description = "All-hands project for GitHub analytics"
+platforms = ["linux-64"]
+
+[tasks]
+start = "python src/github_analytics/fetch_data.py"
+stats = "python src/github_analytics/quick_stats.py"
+lint = "ruff check ."
+format = "ruff format ."
+lint-fix = "ruff check --fix ."
+
+[dependencies]
+python = ">=3.10"
+pygithub = "*"
+python-dotenv = "*"
+polars = "*"
+rich = "*"
+ruff = "*"
+pre-commit = "*"
