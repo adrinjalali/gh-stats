@@ -1,5 +1,6 @@
 """Script to quickly get PR and issue statistics from GitHub repositories."""
 
+import argparse
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -29,12 +30,26 @@ REPOS = [
 ]
 
 
-def get_date_bounds() -> tuple[datetime, datetime]:
-    """Get the start and end dates for the past two weeks."""
+def get_date_bounds(start_date: str | None = None) -> tuple[datetime, datetime]:
+    """Get the start and end dates for the analysis period.
+
+    Args:
+        start_date: Optional start date in YYYY-MM-DD format.
+                   If not provided, defaults to two weeks ago.
+    """
     now = datetime.now(timezone.utc)
-    two_weeks_ago = now - timedelta(days=14)
-    two_weeks_ago = two_weeks_ago.replace(hour=0, minute=0, second=0, microsecond=0)
-    return two_weeks_ago, now
+
+    if start_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            start = start.replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            raise ValueError("Start date must be in YYYY-MM-DD format") from e
+    else:
+        start = now - timedelta(days=14)
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return start, now
 
 
 def get_github_client() -> Github:
@@ -124,9 +139,18 @@ def display_stats(stats_list: list[dict]) -> None:
 
 def main() -> None:
     """Main function."""
+    parser = argparse.ArgumentParser(description="Fetch GitHub repository statistics")
+    parser.add_argument(
+        "--start",
+        type=str,
+        help="Start date in YYYY-MM-DD format (default: 2 weeks ago)",
+    )
+
+    args = parser.parse_args()
+
     try:
         g = get_github_client()
-        start_date, end_date = get_date_bounds()
+        start_date, end_date = get_date_bounds(args.start)
 
         console.print(
             f"[bold]Fetching stats from {start_date:%Y-%m-%d} "
