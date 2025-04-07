@@ -330,7 +330,7 @@ def main() -> None:
         console.print(f"\n[green]{msg}[/green]")
 
     except Exception as e:
-        console.print(f"[red]Error: {str(e)}[/red]")
+        console.print(f"[red]Error: {e!s}[/red]")
         if isinstance(e, GithubException):
             console.print(
                 f"[red]GitHub API Error: Status={e.status}, Data={e.data}[/red]"
