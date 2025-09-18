@@ -54,10 +54,13 @@ def get_date_bounds(start_date: str | None = None) -> tuple[datetime, datetime]:
 
 def get_github_client() -> Github:
     """Initialize and return GitHub client using token from environment."""
+    print("getting the token")
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         msg = "GitHub token not found. Please set GITHUB_TOKEN environment variable."
         raise ValueError(msg)
+
+    print("token", token)
 
     client = Github(token)
     try:
