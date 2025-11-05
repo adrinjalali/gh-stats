@@ -1,7 +1,9 @@
 """Script to build a comprehensive SQLite database of GitHub project data."""
 
+import argparse
 import json
 import os
+import signal
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -31,6 +33,24 @@ console = Console()
 
 # Database path
 DB_PATH = Path("project_database.db")
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle interrupt signals gracefully."""
+    global shutdown_requested
+    console.print(
+        "\n[yellow]Interrupt received. Finishing current batch and saving progress..."
+        "[/yellow]"
+    )
+    shutdown_requested = True
+
+
+# Register signal handler
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 class GitHubGraphQLClient:
@@ -178,9 +198,31 @@ def init_database() -> sqlite3.Connection:
             last_issue_number INTEGER DEFAULT 0,
             total_prs INTEGER DEFAULT 0,
             total_issues INTEGER DEFAULT 0,
+            last_pr_cursor TEXT,
+            last_issue_cursor TEXT,
             last_sync_at TEXT,
             UNIQUE(repo_name)
         )
+    """)
+
+    # Create indexes for better query performance
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pr_number ON pull_requests(number);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pr_state ON pull_requests(state);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pr_created ON pull_requests(created_at);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_issue_number ON issues(number);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_issue_state ON issues(state);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_issue_created ON issues(created_at);
     """)
 
     conn.commit()
@@ -190,41 +232,83 @@ def init_database() -> sqlite3.Connection:
 def get_sync_progress(conn: sqlite3.Connection, repo_name: str) -> dict[str, Any]:
     """Get current sync progress for a repository."""
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT last_pr_number, last_issue_number, total_prs, total_issues, last_sync_at
-        FROM sync_progress WHERE repo_name = ?
-    """,
-        (repo_name,),
-    )
 
-    result = cursor.fetchone()
-    if result:
-        return {
-            "last_pr_number": result[0],
-            "last_issue_number": result[1],
-            "total_prs": result[2],
-            "total_issues": result[3],
-            "last_sync_at": result[4],
-        }
+    # First check if columns exist (for backward compatibility)
+    cursor.execute("PRAGMA table_info(sync_progress)")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if "last_pr_cursor" in columns and "last_issue_cursor" in columns:
+        cursor.execute(
+            """
+            SELECT last_pr_number, last_issue_number, total_prs, total_issues,
+                   last_pr_cursor, last_issue_cursor, last_sync_at
+            FROM sync_progress WHERE repo_name = ?
+        """,
+            (repo_name,),
+        )
+        result = cursor.fetchone()
+        if result:
+            return {
+                "last_pr_number": result[0],
+                "last_issue_number": result[1],
+                "total_prs": result[2],
+                "total_issues": result[3],
+                "last_pr_cursor": result[4],
+                "last_issue_cursor": result[5],
+                "last_sync_at": result[6],
+            }
     else:
-        # Initialize progress tracking
+        # Old schema, migrate it
+        cursor.execute(
+            """
+            SELECT last_pr_number, last_issue_number, total_prs, total_issues,
+            last_sync_at
+            FROM sync_progress WHERE repo_name = ?
+        """,
+            (repo_name,),
+        )
+        result = cursor.fetchone()
+        if result:
+            # Add missing columns
+            cursor.execute("ALTER TABLE sync_progress ADD COLUMN last_pr_cursor TEXT")
+            cursor.execute(
+                "ALTER TABLE sync_progress ADD COLUMN last_issue_cursor TEXT"
+            )
+            conn.commit()
+            return {
+                "last_pr_number": result[0],
+                "last_issue_number": result[1],
+                "total_prs": result[2],
+                "total_issues": result[3],
+                "last_pr_cursor": None,
+                "last_issue_cursor": None,
+                "last_sync_at": result[4],
+            }
+
+    # Initialize progress tracking if not exists
+    try:
         cursor.execute(
             """
             INSERT INTO sync_progress (repo_name, last_pr_number, last_issue_number,
-            total_prs, total_issues)
-            VALUES (?, 0, 0, 0, 0)
+            total_prs, total_issues, last_pr_cursor, last_issue_cursor)
+            VALUES (?, 0, 0, 0, 0, NULL, NULL)
         """,
             (repo_name,),
         )
         conn.commit()
-        return {
-            "last_pr_number": 0,
-            "last_issue_number": 0,
-            "total_prs": 0,
-            "total_issues": 0,
-            "last_sync_at": None,
-        }
+    except sqlite3.IntegrityError:
+        # Record already exists, which is fine
+        pass
+
+    return {
+        "last_pr_number": 0,
+        "last_issue_number": 0,
+        "total_prs": 0,
+        "total_issues": 0,
+        "last_pr_cursor": None,
+        "last_issue_cursor": None,
+        "last_sync_at": None,
+    }
 
 
 def update_sync_progress(conn: sqlite3.Connection, repo_name: str, **kwargs):
@@ -240,6 +324,8 @@ def update_sync_progress(conn: sqlite3.Connection, repo_name: str, **kwargs):
             "last_issue_number",
             "total_prs",
             "total_issues",
+            "last_pr_cursor",
+            "last_issue_cursor",
             "last_sync_at",
         ]:
             updates.append(f"{key} = ?")
@@ -272,8 +358,92 @@ def get_repo_counts_query() -> str:
     """
 
 
-def get_prs_query() -> str:
-    """GraphQL query to fetch PR details."""
+def get_prs_query(since_date: str | None = None) -> str:
+    """GraphQL query to fetch PR details.
+
+    Args:
+        since_date: ISO format date string to fetch PRs created  after this date
+    """
+    # Build the filter string if we have a since date
+    if since_date:
+        # GitHub doesn't support direct date filtering in pullRequests,
+        # so we'll use search query instead for better efficiency
+        return """
+        query($query: String!, $first: Int!, $after: String) {
+            search(query: $query, type: ISSUE, first: $first, after: $after) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+                issueCount
+                nodes {
+                    ... on PullRequest {
+                        number
+                        title
+                        body
+                        createdAt
+                        updatedAt
+                        closedAt
+                        mergedAt
+                        state
+                        isDraft
+                        author {
+                            login
+                        }
+                        assignees(first: 10) {
+                            nodes {
+                                login
+                            }
+                        }
+                        reviewRequests(first: 10) {
+                            nodes {
+                                requestedReviewer {
+                                    ... on User {
+                                        login
+                                    }
+                                }
+                            }
+                        }
+                        labels(first: 20) {
+                            nodes {
+                                name
+                            }
+                        }
+                        milestone {
+                            title
+                        }
+                        additions
+                        deletions
+                        changedFiles
+                        url
+                        timelineItems(last: 1) {
+                            nodes {
+                                ... on IssueComment {
+                                    createdAt
+                                }
+                                ... on PullRequestCommit {
+                                    commit {
+                                        authoredDate
+                                    }
+                                }
+                                ... on PullRequestReview {
+                                    createdAt
+                                }
+                                ... on ClosedEvent {
+                                    createdAt
+                                }
+                                ... on MergedEvent {
+                                    createdAt
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+
+    # Original query for full fetch
     return """
     query($owner: String!, $name: String!, $first: Int!, $after: String) {
         repository(owner: $owner, name: $name) {
@@ -350,8 +520,74 @@ def get_prs_query() -> str:
     """
 
 
-def get_issues_query() -> str:
-    """GraphQL query to fetch issue details."""
+def get_issues_query(since_date: str | None = None) -> str:
+    """GraphQL query to fetch issue details.
+
+    Args:
+        since_date: ISO format date string to fetch issues created after this date
+    """
+    if since_date:
+        # Use search API for efficient date filtering
+        return """
+        query($query: String!, $first: Int!, $after: String) {
+            search(query: $query, type: ISSUE, first: $first, after: $after) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+                issueCount
+                nodes {
+                    ... on Issue {
+                        number
+                        title
+                        body
+                        createdAt
+                        updatedAt
+                        closedAt
+                        state
+                        author {
+                            login
+                        }
+                        assignees(first: 10) {
+                            nodes {
+                                login
+                            }
+                        }
+                        labels(first: 20) {
+                            nodes {
+                                name
+                            }
+                        }
+                        milestone {
+                            title
+                        }
+                        comments {
+                            totalCount
+                        }
+                        url
+                        timelineItems(last: 1) {
+                            nodes {
+                                ... on IssueComment {
+                                    createdAt
+                                }
+                                ... on ClosedEvent {
+                                    createdAt
+                                }
+                                ... on ReopenedEvent {
+                                    createdAt
+                                }
+                                ... on LabeledEvent {
+                                    createdAt
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+
+    # Original query for full fetch
     return """
     query($owner: String!, $name: String!, $first: Int!, $after: String) {
         repository(owner: $owner, name: $name) {
@@ -543,13 +779,57 @@ def fetch_all_prs(
     client: GitHubGraphQLClient, owner: str, repo: str, conn: sqlite3.Connection
 ):
     """Fetch all PRs using GraphQL pagination with error recovery."""
-    query = get_prs_query()
-    cursor = None
     batch_size = 25  # Reduced batch size for more reliable requests
 
     progress = get_sync_progress(conn, f"{owner}/{repo}")
     total_count = progress["total_prs"]
-    processed = 0
+    last_pr_number = progress["last_pr_number"]
+    cursor = progress.get("last_pr_cursor")  # Resume from saved cursor
+
+    # Count how many PRs we already have
+    cursor_db = conn.cursor()
+    cursor_db.execute("SELECT COUNT(*) FROM pull_requests")
+    already_processed = cursor_db.fetchone()[0]
+
+    # Get the most recent PR creation date from our database
+    cursor_db.execute("""
+        SELECT MAX(created_at) FROM pull_requests
+    """)
+    result = cursor_db.fetchone()
+    most_recent_date = result[0] if result and result[0] else None
+
+    remaining_count = max(0, total_count - already_processed)
+
+    # Decide whether to use incremental fetch or full fetch
+    use_incremental = (
+        most_recent_date and not cursor and already_processed > 100
+    )  # Only use incremental if we have substantial data
+
+    if use_incremental:
+        console.print(
+            f"[blue]Found {already_processed} existing PRs, using incremental fetch "
+            "for newer PRs[/blue]"
+        )
+        console.print(f"[dim]Fetching PRs created after {most_recent_date}[/dim]")
+        query = get_prs_query(since_date=most_recent_date)
+    elif cursor and last_pr_number > 0 and already_processed > 0:
+        console.print(
+            f"[blue]Resuming from PR #{last_pr_number}, {remaining_count} PRs "
+            "remaining[/blue]"
+        )
+        console.print(
+            "[dim]Using saved pagination cursor to continue from last position" "[/dim]"
+        )
+        query = get_prs_query()
+    elif already_processed > 0:
+        console.print(
+            f"[blue]Found {already_processed} existing PRs, fetching remaining "
+            f"{remaining_count}[/blue]"
+        )
+        query = get_prs_query()
+    else:
+        console.print(f"[blue]Starting fresh fetch of {total_count} PRs[/blue]")
+        query = get_prs_query()
 
     with Progress(
         SpinnerColumn(),
@@ -559,37 +839,95 @@ def fetch_all_prs(
         TimeElapsedColumn(),
         console=console,
     ) as progress_bar:
-        task = progress_bar.add_task("Fetching PRs...", total=total_count)
+        task = progress_bar.add_task(
+            "Fetching PRs...", total=remaining_count, completed=0
+        )
 
         while True:
-            variables = {
-                "owner": owner,
-                "name": repo,
-                "first": batch_size,
-                "after": cursor,
-            }
+            if use_incremental:
+                # Build search query for incremental fetch
+                search_query = f"repo:{owner}/{repo} is:pr created:>{most_recent_date}"
+                variables = {
+                    "query": search_query,
+                    "first": batch_size,
+                    "after": cursor,
+                }
+            else:
+                variables = {
+                    "owner": owner,
+                    "name": repo,
+                    "first": batch_size,
+                    "after": cursor,
+                }
 
             try:
                 result = client.query(query, variables)
-                prs_data = result["data"]["repository"]["pullRequests"]
+                if use_incremental:
+                    prs_data = result["data"]["search"]
+                    # Filter to only get PullRequests (search can return mixed types)
+                    prs_data["nodes"] = [
+                        node for node in prs_data.get("nodes", []) if node
+                    ]
+                else:
+                    prs_data = result["data"]["repository"]["pullRequests"]
 
                 if not prs_data["nodes"]:
+                    console.print(
+                        "[green]No more PRs to fetch - all caught up![/green]"
+                    )
                     break
 
-                # Save this batch
-                save_prs_to_db(conn, prs_data["nodes"])
+                # Check for shutdown request
+                if shutdown_requested:
+                    console.print("[yellow]Stopping PR fetch as requested...[/yellow]")
+                    break
 
-                # Update progress
-                batch_prs = len(prs_data["nodes"])
-                processed += batch_prs
-                last_pr = max(pr["number"] for pr in prs_data["nodes"])
-
-                update_sync_progress(conn, f"{owner}/{repo}", last_pr_number=last_pr)
-                progress_bar.update(
-                    task,
-                    advance=batch_prs,
-                    description=f"Fetching PRs (last: #{last_pr})",
+                # Check which PRs are new (not in database)
+                pr_numbers = [pr["number"] for pr in prs_data["nodes"]]
+                cursor_db = conn.cursor()
+                placeholders = ",".join(["?"] * len(pr_numbers))
+                cursor_db.execute(
+                    "SELECT number FROM pull_requests WHERE number IN "
+                    f"({placeholders})",
+                    pr_numbers,
                 )
+                existing_prs = {row[0] for row in cursor_db.fetchall()}
+
+                new_prs = [
+                    pr for pr in prs_data["nodes"] if pr["number"] not in existing_prs
+                ]
+
+                if new_prs:
+                    # Save only new PRs
+                    save_prs_to_db(conn, new_prs)
+                    batch_prs = len(new_prs)
+                else:
+                    batch_prs = 0
+
+                # Update progress with current cursor for resumption
+                last_pr = max(pr["number"] for pr in prs_data["nodes"])
+                next_cursor = prs_data["pageInfo"]["endCursor"]
+
+                update_sync_progress(
+                    conn,
+                    f"{owner}/{repo}",
+                    last_pr_number=last_pr,
+                    last_pr_cursor=next_cursor,
+                )
+
+                if batch_prs > 0:
+                    progress_bar.update(
+                        task,
+                        advance=batch_prs,
+                        description=(
+                            f"Fetching PRs (last: #{last_pr}, new: {batch_prs})"
+                        ),
+                    )
+                else:
+                    progress_bar.update(
+                        task,
+                        description=f"Skipping already fetched PRs (last: #{last_pr})",
+                    )
 
                 # Check if we have more pages
                 if not prs_data["pageInfo"]["hasNextPage"]:
@@ -613,13 +951,61 @@ def fetch_all_issues(
     client: GitHubGraphQLClient, owner: str, repo: str, conn: sqlite3.Connection
 ):
     """Fetch all issues using GraphQL pagination with error recovery."""
-    query = get_issues_query()
-    cursor = None
     batch_size = 25  # Reduced batch size for more reliable requests
 
     progress = get_sync_progress(conn, f"{owner}/{repo}")
     total_count = progress["total_issues"]
-    processed = 0
+    last_issue_number = progress["last_issue_number"]
+    cursor = progress.get("last_issue_cursor")  # Resume from saved cursor
+
+    # Count how many issues we already have (excluding PRs)
+    cursor_db = conn.cursor()
+    cursor_db.execute(
+        "SELECT COUNT(*) FROM issues WHERE number NOT IN (SELECT number FROM "
+        "pull_requests)"
+    )
+    already_processed = cursor_db.fetchone()[0]
+
+    # Get the most recent issue creation date from our database (excluding PRs)
+    cursor_db.execute("""
+        SELECT MAX(created_at) FROM issues
+        WHERE number NOT IN (SELECT number FROM pull_requests)
+    """)
+    result = cursor_db.fetchone()
+    most_recent_date = result[0] if result and result[0] else None
+
+    remaining_count = max(0, total_count - already_processed)
+
+    # Decide whether to use incremental fetch or full fetch
+    use_incremental = (
+        most_recent_date and not cursor and already_processed > 100
+    )  # Only use incremental if we have substantial data
+
+    if use_incremental:
+        console.print(
+            f"[blue]Found {already_processed} existing issues, using incremental fetch "
+            "for newer issues[/blue]"
+        )
+        console.print(f"[dim]Fetching issues created after {most_recent_date}[/dim]")
+        query = get_issues_query(since_date=most_recent_date)
+    elif cursor and last_issue_number > 0 and already_processed > 0:
+        console.print(
+            f"[blue]Resuming from Issue #{last_issue_number}, {remaining_count} issues "
+            "remaining[/blue]"
+        )
+        console.print(
+            "[dim]Using saved pagination cursor to continue from last position" "[/dim]"
+        )
+        query = get_issues_query()
+    elif already_processed > 0:
+        console.print(
+            f"[blue]Found {already_processed} existing issues, fetching remaining "
+            f"{remaining_count}[/blue]"
+        )
+        query = get_issues_query()
+    else:
+        console.print(f"[blue]Starting fresh fetch of {total_count} issues[/blue]")
+        query = get_issues_query()
 
     with Progress(
         SpinnerColumn(),
@@ -629,39 +1015,101 @@ def fetch_all_issues(
         TimeElapsedColumn(),
         console=console,
     ) as progress_bar:
-        task = progress_bar.add_task("Fetching Issues...", total=total_count)
+        task = progress_bar.add_task(
+            "Fetching Issues...", total=remaining_count, completed=0
+        )
 
         while True:
-            variables = {
-                "owner": owner,
-                "name": repo,
-                "first": batch_size,
-                "after": cursor,
-            }
+            if use_incremental:
+                # Build search query for incremental fetch (exclude PRs)
+                search_query = (
+                    f"repo:{owner}/{repo} is:issue created:>{most_recent_date}"
+                )
+                variables = {
+                    "query": search_query,
+                    "first": batch_size,
+                    "after": cursor,
+                }
+            else:
+                variables = {
+                    "owner": owner,
+                    "name": repo,
+                    "first": batch_size,
+                    "after": cursor,
+                }
 
             try:
                 result = client.query(query, variables)
-                issues_data = result["data"]["repository"]["issues"]
+                if use_incremental:
+                    issues_data = result["data"]["search"]
+                    # Filter to only get Issues (search can return mixed types)
+                    issues_data["nodes"] = [
+                        node for node in issues_data.get("nodes", []) if node
+                    ]
+                else:
+                    issues_data = result["data"]["repository"]["issues"]
 
                 if not issues_data["nodes"]:
+                    console.print(
+                        "[green]No more issues to fetch - all caught up![/green]"
+                    )
                     break
 
-                # Save this batch
-                save_issues_to_db(conn, issues_data["nodes"])
+                # Check for shutdown request
+                if shutdown_requested:
+                    console.print(
+                        "[yellow]Stopping issue fetch as requested...[/yellow]"
+                    )
+                    break
 
-                # Update progress
-                batch_issues = len(issues_data["nodes"])
-                processed += batch_issues
+                # Check which issues are new (not in database)
+                issue_numbers = [issue["number"] for issue in issues_data["nodes"]]
+                cursor_db = conn.cursor()
+                placeholders = ",".join(["?"] * len(issue_numbers))
+                cursor_db.execute(
+                    f"SELECT number FROM issues WHERE number IN ({placeholders})",
+                    issue_numbers,
+                )
+                existing_issues = {row[0] for row in cursor_db.fetchall()}
+
+                new_issues = [
+                    issue
+                    for issue in issues_data["nodes"]
+                    if issue["number"] not in existing_issues
+                ]
+
+                if new_issues:
+                    # Save only new issues
+                    save_issues_to_db(conn, new_issues)
+                    batch_issues = len(new_issues)
+                else:
+                    batch_issues = 0
+
+                # Update progress with current cursor for resumption
                 last_issue = max(issue["number"] for issue in issues_data["nodes"])
+                next_cursor = issues_data["pageInfo"]["endCursor"]
 
                 update_sync_progress(
-                    conn, f"{owner}/{repo}", last_issue_number=last_issue
+                    conn,
+                    f"{owner}/{repo}",
+                    last_issue_number=last_issue,
+                    last_issue_cursor=next_cursor,
                 )
-                progress_bar.update(
-                    task,
-                    advance=batch_issues,
-                    description=f"Fetching Issues (last: #{last_issue})",
-                )
+
+                if batch_issues > 0:
+                    progress_bar.update(
+                        task,
+                        advance=batch_issues,
+                        description=f"Fetching Issues (last: #{last_issue}, new: "
+                        f"{batch_issues})",
+                    )
+                else:
+                    progress_bar.update(
+                        task,
+                        description=(
+                            "Skipping already fetched issues (last: " f"#{last_issue})"
+                        ),
+                    )
 
                 # Check if we have more pages
                 if not issues_data["pageInfo"]["hasNextPage"]:
@@ -681,9 +1129,44 @@ def fetch_all_issues(
                 # Continue with same cursor to retry
 
 
+def reset_database(conn: sqlite3.Connection, repo_name: str):
+    """Reset the database for a fresh start."""
+    cursor = conn.cursor()
+
+    console.print(f"[yellow]Resetting database for {repo_name}...[/yellow]")
+
+    # Clear all data
+    cursor.execute("DELETE FROM pull_requests")
+    cursor.execute("DELETE FROM issues")
+    cursor.execute("DELETE FROM sync_progress WHERE repo_name = ?", (repo_name,))
+
+    conn.commit()
+    console.print("[green]Database reset complete![/green]")
+
+
 def main():
     """Main function to build the project database."""
-    repo_name = "scikit-learn/scikit-learn"
+    parser = argparse.ArgumentParser(
+        description="Build a comprehensive SQLite database of GitHub project data."
+    )
+    parser.add_argument(
+        "--repo",
+        default="scikit-learn/scikit-learn",
+        help="Repository in format owner/repo (default: scikit-learn/scikit-learn)",
+    )
+    parser.add_argument(
+        "--reset", action="store_true", help="Reset the database and start fresh"
+    )
+    parser.add_argument(
+        "--skip-prs", action="store_true", help="Skip fetching pull requests"
+    )
+    parser.add_argument(
+        "--skip-issues", action="store_true", help="Skip fetching issues"
+    )
+
+    args = parser.parse_args()
+
+    repo_name = args.repo
     owner, repo = repo_name.split("/")
 
     console.print(f"[bold]Building database for {repo_name}[/bold]")
@@ -717,25 +1200,53 @@ def main():
             f"[blue]Repository has {total_prs} PRs and {total_issues} issues[/blue]"
         )
 
+        # Handle reset if requested
+        if args.reset:
+            reset_database(conn, repo_name)
+
         # Update totals in progress tracking
         update_sync_progress(
             conn, repo_name, total_prs=total_prs, total_issues=total_issues
         )
 
         # Fetch all PRs
-        console.print("[yellow]Fetching pull requests...[/yellow]")
-        fetch_all_prs(client, owner, repo, conn)
+        if not args.skip_prs and not shutdown_requested:
+            console.print("[yellow]Fetching pull requests...[/yellow]")
+            fetch_all_prs(client, owner, repo, conn)
+        elif args.skip_prs:
+            console.print("[dim]Skipping pull requests as requested[/dim]")
 
         # Fetch all issues
-        console.print("[yellow]Fetching issues...[/yellow]")
-        fetch_all_issues(client, owner, repo, conn)
+        if not args.skip_issues and not shutdown_requested:
+            console.print("[yellow]Fetching issues...[/yellow]")
+            fetch_all_issues(client, owner, repo, conn)
+        elif args.skip_issues:
+            console.print("[dim]Skipping issues as requested[/dim]")
 
         # Update final sync time
         update_sync_progress(
             conn, repo_name, last_sync_at=datetime.now(timezone.utc).isoformat()
         )
 
-        console.print(f"[green]Database build complete! Saved to {DB_PATH}[/green]")
+        if shutdown_requested:
+            console.print(
+                "[yellow]Database sync interrupted but progress saved! Updated "
+                "{DB_PATH}[/yellow]"
+            )
+            console.print(
+                "[yellow]Run the script again to resume from where you left off."
+                "[/yellow]"
+            )
+        else:
+            console.print(f"[green]Database sync complete! Updated {DB_PATH}[/green]")
+
+        # Show resumption status
+        final_progress = get_sync_progress(conn, repo_name)
+        console.print(
+            f"[blue]Final state: PR #{final_progress['last_pr_number']}, Issue "
+            f"#{final_progress['last_issue_number']}[/blue]"
+        )
+        console.print(f"[blue]Last sync: {final_progress['last_sync_at']}[/blue]")
 
         # Show some stats
         cursor = conn.cursor()

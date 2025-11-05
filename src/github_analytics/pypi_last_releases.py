@@ -50,10 +50,11 @@ def main():
     for project in PROJECTS:
         print(f"\nProject: {project}")
         try:
-            last_releases = get_last_releases(project)
+            last_releases = get_last_releases(project, 3)
             for version, date in last_releases:
                 dt = datetime.fromisoformat(date.replace("Z", "+00:00"))
-                print(f"  Version: {version}  Date: {dt:%Y-%m-%d %H:%M:%S %Z}")
+                # print(f"  Version: {version}  Date: {dt:%Y-%m-%d %H:%M:%S %Z}")
+                print(f"{project}, {version}, {dt:%Y-%m-%d}")
         except Exception as e:
             print(f"  Error fetching data: {e}")
 
