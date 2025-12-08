@@ -1,4 +1,4 @@
-[project]
+[workspace]
 authors = ["adrinjalali <adrin.jalali@gmail.com>"]
 channels = ["conda-forge"]
 name = "all-hands"

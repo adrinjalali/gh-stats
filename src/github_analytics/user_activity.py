@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import github
 import polars as pl
 from dotenv import load_dotenv
 from github import Github
@@ -65,7 +66,7 @@ def get_github_client() -> Github:
     if not token:
         raise RuntimeError("GITHUB_TOKEN not set in environment or .env file")
 
-    gh = Github(token, per_page=100)
+    gh = Github(auth=github.Auth.Token(token), per_page=100)
     try:
         console.print(f"[green]Authenticated as {gh.get_user().login}[/green]")
     except Exception as err:
@@ -108,17 +109,17 @@ EVENT_SPECS: dict[str, EventSpec] = {
     "PullRequestEvent": (
         lambda p: p.get("action", "acted"),  # opened / closed / reopened / etc.
         lambda p, _: (
-            p["pull_request"]["title"],
-            p["pull_request"]["html_url"],
-            p["pull_request"]["number"],
+            p["pull_request"].get("title", "(title unavailable)"),
+            p["pull_request"].get("html_url", ""),
+            p["pull_request"].get("number", 0),
         ),
     ),
     "PullRequestReviewCommentEvent": (
         "review comment",
         lambda p, _: (
-            p["pull_request"]["title"],
-            p["comment"]["html_url"],
-            p["pull_request"]["number"],
+            p["pull_request"].get("title", "(title unavailable)"),
+            p.get("comment", {}).get("html_url", ""),
+            p["pull_request"].get("number", 0),
         ),
     ),
     "PullRequestReviewEvent": (
@@ -126,9 +127,10 @@ EVENT_SPECS: dict[str, EventSpec] = {
         lambda p, repo: (
             # PyGithub does not expose review details in *payload*; fall back
             # to PR API URL with review anchor - lacks direct link.
-            p["pull_request"]["title"],
-            f"https://github.com/{repo}/pull/{p['pull_request']['number']}#pullrequestreview",
-            p["pull_request"]["number"],
+            p["pull_request"].get("title", "(title unavailable)"),
+            f"https://github.com/{repo}/pull/{p['pull_request'].get('number', 0)}"
+            "#pullrequestreview",
+            p["pull_request"].get("number", 0),
         ),
     ),
 }
