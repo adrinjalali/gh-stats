@@ -10,18 +10,15 @@ last *N* days (default: 7).  For each item the script shows:
 * the type of the **latest** involvement within the period,
 * a link to that latest involvement.
 
-The implementation relies on the REST *events* API exposed via **PyGithub**.
-The authenticated user's rate-limit is ~5k requests per hour which is more than
-sufficient because we only need to fetch at most the 300 most-recent events -
-the maximum returned by the endpoint.  The script stops once events become
-older than the requested time window, minimizing API usage.
-
-This script is intended as a quick, self-contained report - no incremental
-caching.  Execution time is typically < 2 s.
+The implementation uses GitHub's GraphQL API to query:
+1. Issue comments by the user
+2. Issues created by the user
+3. Pull requests created by the user
+4. Pull request reviews by the user
 
 Usage
 -----
-$ python -m github_analytics.user_activity --user adrinm
+$ python -m github_analytics.user_activity --user StefanieSenger
 
 Requires ``GITHUB_TOKEN`` in the environment (``.env`` supported).
 """
@@ -34,12 +31,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import github
 import polars as pl
+import requests
 from dotenv import load_dotenv
-from github import Github
-from github.Event import Event as GHEvent
-from github.GithubException import GithubException
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -55,85 +49,349 @@ from rich.table import Table
 load_dotenv()
 console = Console()
 
+GRAPHQL_URL = "https://api.github.com/graphql"
+
+# ---------------------------------------------------------------------------
+# GraphQL queries
+# ---------------------------------------------------------------------------
+
+# Query for issue comments by a user (most recent first)
+ISSUE_COMMENTS_QUERY = """
+query($login: String!, $cursor: String) {
+  user(login: $login) {
+    issueComments(first: 100, after: $cursor, orderBy:
+        {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        createdAt
+        url
+        issue {
+          number
+          title
+          url
+          state
+          repository {
+            nameWithOwner
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query for issues created by a user
+ISSUES_QUERY = """
+query($login: String!, $cursor: String) {
+  user(login: $login) {
+    issues(first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        url
+        state
+        createdAt
+        updatedAt
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query for pull requests created by a user
+PULL_REQUESTS_QUERY = """
+query($login: String!, $cursor: String) {
+  user(login: $login) {
+    pullRequests(first: 100, after: $cursor, orderBy:
+        {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        url
+        state
+        merged
+        createdAt
+        updatedAt
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query for PR reviews by a user (via contributionsCollection)
+PR_REVIEWS_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!, $cursor: String) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      pullRequestReviewContributions(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          occurredAt
+          pullRequestReview {
+            url
+          }
+          pullRequest {
+            number
+            title
+            url
+            state
+            merged
+            repository {
+              nameWithOwner
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
 
 
-def get_github_client() -> Github:
-    """Return an authenticated GitHub client using *GITHUB_TOKEN*."""
+def get_github_token() -> str:
+    """Return the GitHub token from environment."""
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise RuntimeError("GITHUB_TOKEN not set in environment or .env file")
-
-    gh = Github(auth=github.Auth.Token(token), per_page=100)
-    try:
-        console.print(f"[green]Authenticated as {gh.get_user().login}[/green]")
-    except Exception as err:
-        raise RuntimeError("Invalid GitHub token") from err
-    return gh
+    return token
 
 
-def end_of_day(dt: datetime) -> datetime:
-    """Return *dt* rounded to 23:59:59 of that same day (UTC)."""
-    return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+def graphql_request(query: str, variables: dict[str, Any], token: str) -> dict:
+    """Execute a GraphQL request and return the response data."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        GRAPHQL_URL,
+        json={"query": query, "variables": variables},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if "errors" in result:
+        raise RuntimeError(f"GraphQL errors: {result['errors']}")
+    return result["data"]
+
+
+def parse_datetime(dt_str: str) -> datetime:
+    """Parse ISO datetime string to datetime object."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+
+def get_status_char(state: str, merged: bool = False) -> str:
+    """Return status character based on state."""
+    if merged:
+        return "✓"
+    return "x" if state == "CLOSED" else "○"
 
 
 # ---------------------------------------------------------------------------
-# Event parsing
+# Data collection functions
 # ---------------------------------------------------------------------------
 
-# Mapping of GitHub event types to human-friendly involvement labels and a
-# function that extracts title / url / number from the *payload*.
-# The lambda receives (*payload*, *repo_full_name*) and must return:
-#   title, html_url, number
-EventSpec = tuple[str, "callable[[dict[str, Any], str], tuple[str, str, int]]"]
-EVENT_SPECS: dict[str, EventSpec] = {
-    "IssueCommentEvent": (
-        "commented",
-        lambda p, _: (
-            p.get("issue", {}).get("title", "(title unavailable)"),
-            p.get("comment", {}).get("html_url", ""),
-            p.get("issue", {}).get("number", 0),
-        ),
-    ),
-    "IssuesEvent": (
-        # action e.g. opened / closed / reopened / edited
-        lambda p: p.get("action", "acted"),  # type: ignore[return-value]
-        lambda p, _: (
-            p.get("issue", {}).get("title", "(title unavailable)"),
-            p.get("issue", {}).get("html_url", ""),
-            p.get("issue", {}).get("number", 0),
-        ),
-    ),
-    "PullRequestEvent": (
-        lambda p: p.get("action", "acted"),  # opened / closed / reopened / etc.
-        lambda p, _: (
-            p["pull_request"].get("title", "(title unavailable)"),
-            p["pull_request"].get("html_url", ""),
-            p["pull_request"].get("number", 0),
-        ),
-    ),
-    "PullRequestReviewCommentEvent": (
-        "review comment",
-        lambda p, _: (
-            p["pull_request"].get("title", "(title unavailable)"),
-            p.get("comment", {}).get("html_url", ""),
-            p["pull_request"].get("number", 0),
-        ),
-    ),
-    "PullRequestReviewEvent": (
-        "reviewed",
-        lambda p, repo: (
-            # PyGithub does not expose review details in *payload*; fall back
-            # to PR API URL with review anchor - lacks direct link.
-            p["pull_request"].get("title", "(title unavailable)"),
-            f"https://github.com/{repo}/pull/{p['pull_request'].get('number', 0)}"
-            "#pullrequestreview",
-            p["pull_request"].get("number", 0),
-        ),
-    ),
-}
+
+def fetch_issue_comments(
+    token: str, login: str, since: datetime
+) -> list[dict[str, Any]]:
+    """Fetch all issue comments by the user since the given date."""
+    results = []
+    cursor = None
+
+    while True:
+        data = graphql_request(
+            ISSUE_COMMENTS_QUERY, {"login": login, "cursor": cursor}, token
+        )
+        comments = data["user"]["issueComments"]
+
+        for node in comments["nodes"]:
+            if not node or not node.get("issue"):
+                continue
+
+            created = parse_datetime(node["createdAt"])
+            if created < since:
+                # Comments are ordered by date desc, so we can stop
+                return results
+
+            issue = node["issue"]
+            results.append(
+                {
+                    "repo": issue["repository"]["nameWithOwner"],
+                    "number": issue["number"],
+                    "type": "Issue",
+                    "state": issue["state"],
+                    "title": issue["title"],
+                    "involvement": "commented",
+                    "date": created,
+                    "url": node["url"],
+                    "item_url": issue["url"],
+                }
+            )
+
+        if not comments["pageInfo"]["hasNextPage"]:
+            break
+        cursor = comments["pageInfo"]["endCursor"]
+
+    return results
+
+
+def fetch_issues(token: str, login: str, since: datetime) -> list[dict[str, Any]]:
+    """Fetch all issues created by the user since the given date."""
+    results = []
+    cursor = None
+
+    while True:
+        data = graphql_request(ISSUES_QUERY, {"login": login, "cursor": cursor}, token)
+        issues = data["user"]["issues"]
+
+        for node in issues["nodes"]:
+            if not node:
+                continue
+
+            updated = parse_datetime(node["updatedAt"])
+            if updated < since:
+                return results
+
+            created = parse_datetime(node["createdAt"])
+            results.append(
+                {
+                    "repo": node["repository"]["nameWithOwner"],
+                    "number": node["number"],
+                    "type": "Issue",
+                    "state": node["state"],
+                    "title": node["title"],
+                    "involvement": "author",
+                    "date": created if created >= since else updated,
+                    "url": node["url"],
+                    "item_url": node["url"],
+                }
+            )
+
+        if not issues["pageInfo"]["hasNextPage"]:
+            break
+        cursor = issues["pageInfo"]["endCursor"]
+
+    return results
+
+
+def fetch_pull_requests(
+    token: str, login: str, since: datetime
+) -> list[dict[str, Any]]:
+    """Fetch all pull requests created by the user since the given date."""
+    results = []
+    cursor = None
+
+    while True:
+        data = graphql_request(
+            PULL_REQUESTS_QUERY, {"login": login, "cursor": cursor}, token
+        )
+        prs = data["user"]["pullRequests"]
+
+        for node in prs["nodes"]:
+            if not node:
+                continue
+
+            updated = parse_datetime(node["updatedAt"])
+            if updated < since:
+                return results
+
+            created = parse_datetime(node["createdAt"])
+            results.append(
+                {
+                    "repo": node["repository"]["nameWithOwner"],
+                    "number": node["number"],
+                    "type": "PR",
+                    "state": node["state"],
+                    "merged": node.get("merged", False),
+                    "title": node["title"],
+                    "involvement": "author",
+                    "date": created if created >= since else updated,
+                    "url": node["url"],
+                    "item_url": node["url"],
+                }
+            )
+
+        if not prs["pageInfo"]["hasNextPage"]:
+            break
+        cursor = prs["pageInfo"]["endCursor"]
+
+    return results
+
+
+def fetch_pr_reviews(token: str, login: str, since: datetime) -> list[dict[str, Any]]:
+    """Fetch all PR reviews by the user since the given date."""
+    results = []
+    cursor = None
+
+    # contributionsCollection requires from/to dates
+    from_date = since.isoformat()
+    to_date = datetime.now(timezone.utc).isoformat()
+
+    while True:
+        data = graphql_request(
+            PR_REVIEWS_QUERY,
+            {"login": login, "from": from_date, "to": to_date, "cursor": cursor},
+            token,
+        )
+        contributions = data["user"]["contributionsCollection"][
+            "pullRequestReviewContributions"
+        ]
+
+        for node in contributions["nodes"]:
+            if not node or not node.get("pullRequest"):
+                continue
+
+            pr = node["pullRequest"]
+            occurred = parse_datetime(node["occurredAt"])
+
+            review_url = node.get("pullRequestReview", {}).get("url", pr["url"])
+
+            results.append(
+                {
+                    "repo": pr["repository"]["nameWithOwner"],
+                    "number": pr["number"],
+                    "type": "PR",
+                    "state": pr["state"],
+                    "merged": pr.get("merged", False),
+                    "title": pr["title"],
+                    "involvement": "reviewed",
+                    "date": occurred,
+                    "url": review_url,
+                    "item_url": pr["url"],
+                }
+            )
+
+        if not contributions["pageInfo"]["hasNextPage"]:
+            break
+        cursor = contributions["pageInfo"]["endCursor"]
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +401,15 @@ EVENT_SPECS: dict[str, EventSpec] = {
 
 def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
     """Return a DataFrame of the user's engagements since *since* (UTC)."""
-    gh = get_github_client()
-    user = gh.get_user(user_login)
+    token = get_github_token()
 
-    # Data structure: key -> latest event details
-    latest: dict[tuple[str, int], dict[str, Any]] = {}
+    # Verify authentication
+    auth_query = "query { viewer { login } }"
+    auth_data = graphql_request(auth_query, {}, token)
+    console.print(f"[green]Authenticated as {auth_data['viewer']['login']}[/green]")
+
+    # Collect all activities
+    all_activities: list[dict[str, Any]] = []
 
     with Progress(
         SpinnerColumn(),
@@ -155,92 +417,44 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        evt_task = progress.add_task("Fetching user events...", total=None)
+        task = progress.add_task("Fetching issue comments...", total=None)
+        all_activities.extend(fetch_issue_comments(token, user_login, since))
 
-        # Events are returned newest → oldest (max 300). Stop early once older.
-        for evt in user.get_events():  # type: ignore[assignment]
-            evt: GHEvent
-            created: datetime = evt.created_at.replace(tzinfo=timezone.utc)
-            if created < since:
-                break  # done
+        progress.update(task, description="Fetching issues...")
+        all_activities.extend(fetch_issues(token, user_login, since))
 
-            spec = EVENT_SPECS.get(evt.type)
-            if not spec:
-                continue  # ignore unrelated event types
+        progress.update(task, description="Fetching pull requests...")
+        all_activities.extend(fetch_pull_requests(token, user_login, since))
 
-            involvement_raw, extractor = spec
-            involvement = (
-                involvement_raw(evt.payload)  # type: ignore[arg-type]
-                if callable(involvement_raw)
-                else involvement_raw
-            )
-            repo_full_name = evt.repo.full_name
-            title, url, number = extractor(evt.payload, repo_full_name)
+        progress.update(task, description="Fetching PR reviews...")
+        all_activities.extend(fetch_pr_reviews(token, user_login, since))
 
-            # Determine status character (open ○, closed x, merged ✓) from payload
-            status_char = "?"
-            if "pull_request" in evt.payload:
-                pr_payload = evt.payload["pull_request"]
-                if pr_payload.get("merged"):
-                    status_char = "✓"
-                else:
-                    status_char = "x" if pr_payload.get("state") == "closed" else "○"
-            elif "issue" in evt.payload:
-                issue_payload = evt.payload["issue"]
-                status_char = "x" if issue_payload.get("state") == "closed" else "○"
+        progress.update(task, description="Processing results...")
 
-            key = (repo_full_name, number)
-            # Keep only the **latest** event per key (events are in descending
-            # order so the first one we see is the latest).
-            if key not in latest:
-                latest[key] = {
-                    "repo": repo_full_name,
-                    "number": number,
-                    "type": ("PR" if "pull" in url else "Issue") + f" {status_char}",
-                    "title": title,
-                    "involvement": involvement,
-                    "date": created,
-                    "url": url,
-                }
-
-        progress.update(evt_task, description="Finished fetching events")
-
-    # -------------------------------------------------------------------
-    # Fallback via Search API - ensure no engagements are missed
-    # -------------------------------------------------------------------
-    query_since = since.strftime("%Y-%m-%d")
-    search_q = f"involves:{user_login} updated:>={query_since}"
-    try:
-        search_results = gh.search_issues(query=search_q, sort="updated", order="desc")  # type: ignore[arg-type]
-        for item in search_results:
-            key = (item.repository.full_name, item.number)
-            if key in latest:
-                continue  # already captured via events
-            # Determine status char
-            status_char = (
-                "✓"
-                if getattr(item, "merged", False)
-                else ("x" if item.state == "closed" else "○")
-            )
-            is_pr = bool(item.pull_request)
-            involvement = "author" if item.user.login == user_login else "involved"
-            latest[key] = {
-                "repo": item.repository.full_name,
-                "number": item.number,
-                "type": ("PR" if is_pr else "Issue") + f" {status_char}",
-                "title": item.title,
-                "involvement": involvement,
-                "date": item.updated_at.replace(tzinfo=timezone.utc),
-                "url": item.html_url,
-            }
-    except GithubException:
-        # Search rate-limited or other error - ignore silently
-        pass
-
-    if not latest:
+    if not all_activities:
         return pl.DataFrame()
 
-    # Convert dict_values to a regular list for Polars compatibility
+    # Group by (repo, number) and keep only the most recent activity per item
+    latest: dict[tuple[str, int], dict[str, Any]] = {}
+
+    for activity in all_activities:
+        key = (activity["repo"], activity["number"])
+
+        if key not in latest or activity["date"] > latest[key]["date"]:
+            # Determine status character
+            merged = activity.get("merged", False)
+            status_char = get_status_char(activity["state"], merged)
+
+            latest[key] = {
+                "repo": activity["repo"],
+                "number": activity["number"],
+                "type": f"{activity['type']} {status_char}",
+                "title": activity["title"],
+                "involvement": activity["involvement"],
+                "date": activity["date"],
+                "url": activity["url"],
+            }
+
     df = pl.from_dicts(list(latest.values()))
     df = df.sort("date", descending=True)
     return df
