@@ -473,6 +473,9 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
         )
         return
 
+    # Sort by repo, then by number within each repo
+    df = df.sort(["repo", "number"])
+
     table = Table(title=f"GitHub activity for {user_login} since {since:%Y-%m-%d}")
     table.add_column("Type")
     table.add_column("Repo#")
@@ -481,7 +484,13 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
     table.add_column("Date")
     table.add_column("Link")
 
+    current_repo = None
     for row in df.iter_rows(named=True):
+        # Add a separator row when repo changes
+        if current_repo is not None and row["repo"] != current_repo:
+            table.add_row("", "", "", "", "", "")
+        current_repo = row["repo"]
+
         repo_num = f"{row['repo']}#{row['number']}"
         date_str = row["date"].strftime("%Y-%m-%d")
         table.add_row(
