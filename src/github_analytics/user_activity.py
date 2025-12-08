@@ -56,6 +56,8 @@ GRAPHQL_URL = "https://api.github.com/graphql"
 # ---------------------------------------------------------------------------
 
 # Query for issue comments by a user (most recent first)
+# Note: issueComments includes comments on PRs too (PRs are issues in GitHub)
+# We detect PRs by checking if the URL contains /pull/
 ISSUE_COMMENTS_QUERY = """
 query($login: String!, $cursor: String) {
   user(login: $login) {
@@ -167,6 +169,63 @@ query($login: String!, $from: DateTime!, $to: DateTime!, $cursor: String) {
 }
 """
 
+# Query for commits by a user (via contributionsCollection)
+COMMITS_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      commitContributionsByRepository(maxRepositories: 100) {
+        repository {
+          nameWithOwner
+        }
+        contributions(first: 100, orderBy: {field: OCCURRED_AT, direction: DESC}) {
+          nodes {
+            occurredAt
+            commitCount
+            repository {
+              nameWithOwner
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query for PR comments by a user
+PR_COMMENTS_QUERY = """
+query($login: String!, $cursor: String) {
+  user(login: $login) {
+    pullRequests(first: 100, after: $cursor, orderBy:
+        {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        url
+        state
+        merged
+        updatedAt
+        repository {
+          nameWithOwner
+        }
+        comments(first: 100) {
+          nodes {
+            author { login }
+            createdAt
+            url
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -240,12 +299,15 @@ def fetch_issue_comments(
                 return results
 
             issue = node["issue"]
+            # Check if this is actually a PR by URL pattern (PRs are issues in GitHub)
+            is_pr = "/pull/" in issue["url"]
             results.append(
                 {
                     "repo": issue["repository"]["nameWithOwner"],
                     "number": issue["number"],
-                    "type": "Issue",
+                    "type": "PR" if is_pr else "Issue",
                     "state": issue["state"],
+                    "merged": False,  # Can't determine from this query
                     "title": issue["title"],
                     "involvement": "commented",
                     "date": created,
@@ -394,6 +456,101 @@ def fetch_pr_reviews(token: str, login: str, since: datetime) -> list[dict[str, 
     return results
 
 
+def fetch_pr_comments(token: str, login: str, since: datetime) -> list[dict[str, Any]]:
+    """Fetch all PR comments by the user since the given date."""
+    results = []
+    cursor = None
+    login_lower = login.lower()
+
+    while True:
+        data = graphql_request(
+            PR_COMMENTS_QUERY, {"login": login, "cursor": cursor}, token
+        )
+        prs = data["user"]["pullRequests"]
+
+        for pr_node in prs["nodes"]:
+            if not pr_node:
+                continue
+
+            updated = parse_datetime(pr_node["updatedAt"])
+            if updated < since:
+                return results
+
+            # Check comments on this PR
+            for comment in pr_node.get("comments", {}).get("nodes", []):
+                if not comment:
+                    continue
+                author = comment.get("author")
+                if not author or author.get("login", "").lower() != login_lower:
+                    continue
+
+                created = parse_datetime(comment["createdAt"])
+                if created < since:
+                    continue
+
+                results.append(
+                    {
+                        "repo": pr_node["repository"]["nameWithOwner"],
+                        "number": pr_node["number"],
+                        "type": "PR",
+                        "state": pr_node["state"],
+                        "merged": pr_node.get("merged", False),
+                        "title": pr_node["title"],
+                        "involvement": "commented",
+                        "date": created,
+                        "url": comment["url"],
+                        "item_url": pr_node["url"],
+                    }
+                )
+
+        if not prs["pageInfo"]["hasNextPage"]:
+            break
+        cursor = prs["pageInfo"]["endCursor"]
+
+    return results
+
+
+def fetch_commits(token: str, login: str, since: datetime) -> list[dict[str, Any]]:
+    """Fetch commit contributions by the user since the given date."""
+    results = []
+
+    from_date = since.isoformat()
+    to_date = datetime.now(timezone.utc).isoformat()
+
+    data = graphql_request(
+        COMMITS_QUERY,
+        {"login": login, "from": from_date, "to": to_date},
+        token,
+    )
+
+    repos = data["user"]["contributionsCollection"]["commitContributionsByRepository"]
+    for repo_data in repos:
+        repo_name = repo_data["repository"]["nameWithOwner"]
+        for contrib in repo_data["contributions"]["nodes"]:
+            if not contrib:
+                continue
+
+            occurred = parse_datetime(contrib["occurredAt"])
+            commit_count = contrib.get("commitCount", 1)
+
+            results.append(
+                {
+                    "repo": repo_name,
+                    "number": 0,  # Commits don't have a number
+                    "type": "Commit",
+                    "state": "OPEN",  # N/A for commits
+                    "merged": False,
+                    "title": f"{commit_count} commit(s)",
+                    "involvement": "committed",
+                    "date": occurred,
+                    "url": f"https://github.com/{repo_name}/commits?author={login}",
+                    "item_url": f"https://github.com/{repo_name}",
+                }
+            )
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
@@ -429,23 +586,25 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
         progress.update(task, description="Fetching PR reviews...")
         all_activities.extend(fetch_pr_reviews(token, user_login, since))
 
+        progress.update(task, description="Fetching PR comments...")
+        all_activities.extend(fetch_pr_comments(token, user_login, since))
+
+        progress.update(task, description="Fetching commits...")
+        all_activities.extend(fetch_commits(token, user_login, since))
+
         progress.update(task, description="Processing results...")
 
     if not all_activities:
         return pl.DataFrame()
 
-    # Group by (repo, number) and keep only the most recent activity per item
-    latest: dict[tuple[str, int], dict[str, Any]] = {}
-
+    # Build rows for each activity (no deduplication - show all interactions)
+    rows = []
     for activity in all_activities:
-        key = (activity["repo"], activity["number"])
+        merged = activity.get("merged", False)
+        status_char = get_status_char(activity["state"], merged)
 
-        if key not in latest or activity["date"] > latest[key]["date"]:
-            # Determine status character
-            merged = activity.get("merged", False)
-            status_char = get_status_char(activity["state"], merged)
-
-            latest[key] = {
+        rows.append(
+            {
                 "repo": activity["repo"],
                 "number": activity["number"],
                 "type": f"{activity['type']} {status_char}",
@@ -454,8 +613,9 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
                 "date": activity["date"],
                 "url": activity["url"],
             }
+        )
 
-    df = pl.from_dicts(list(latest.values()))
+    df = pl.from_dicts(rows)
     df = df.sort("date", descending=True)
     return df
 
@@ -473,8 +633,8 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
         )
         return
 
-    # Sort by repo, then by number within each repo
-    df = df.sort(["repo", "number"])
+    # Sort by repo, then by number, then by date within each item
+    df = df.sort(["repo", "number", "date"])
 
     table = Table(title=f"GitHub activity for {user_login} since {since:%Y-%m-%d}")
     table.add_column("Type")
@@ -485,21 +645,36 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
     table.add_column("Link")
 
     current_repo = None
+    current_item_key = None  # (repo, number) to track repeated items
+
     for row in df.iter_rows(named=True):
         # Add a separator row when repo changes
         if current_repo is not None and row["repo"] != current_repo:
             table.add_row("", "", "", "", "", "")
         current_repo = row["repo"]
 
-        repo_num = f"{row['repo']}#{row['number']}"
+        item_key = (row["repo"], row["number"])
+        is_repeat = item_key == current_item_key
+        current_item_key = item_key
+
+        # For commits (number=0), just show repo name
+        if row["number"] == 0:
+            repo_num = row["repo"] if not is_repeat else "↳"
+        else:
+            repo_num = f"{row['repo']}#{row['number']}" if not is_repeat else "↳"
+
+        title = row["title"] if not is_repeat else "↳"
         date_str = row["date"].strftime("%Y-%m-%d")
+        # Shorten URL by removing the common prefix
+        short_url = row["url"].replace("https://github.com/", "")
+
         table.add_row(
             row["type"],
             repo_num,
-            row["title"],
+            title,
             row["involvement"],
             date_str,
-            row["url"],
+            short_url,
         )
 
     console.print(table)
@@ -518,17 +693,22 @@ def main() -> None:
     parser.add_argument(
         "--days", type=int, default=7, help="Look back N days (default 7)"
     )
+    parser.add_argument(
+        "--output", "-o", type=str, help="Output TSV file path (optional)"
+    )
     args = parser.parse_args()
 
     since = datetime.now(timezone.utc) - timedelta(days=args.days)
     df = collect_user_engagements(args.user, since)
     print_summary(df, args.user, since)
 
-    # Optionally export to CSV
-    if not df.is_empty():
-        out_path = Path(f"cache/user_activity_{args.user}.csv")
-        out_path.parent.mkdir(exist_ok=True)
-        df.write_csv(out_path)
+    # Export to TSV if --output specified
+    if args.output and not df.is_empty():
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Sort by repo, number, date for export
+        export_df = df.sort(["repo", "number", "date"])
+        export_df.write_csv(out_path, separator="\t")
         console.print(f"[green]Saved to {out_path}[/green]")
 
 
