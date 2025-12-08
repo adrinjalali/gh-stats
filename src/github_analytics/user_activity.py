@@ -92,18 +92,18 @@ EVENT_SPECS: dict[str, EventSpec] = {
     "IssueCommentEvent": (
         "commented",
         lambda p, _: (
-            p["issue"]["title"],
-            p["comment"]["html_url"],
-            p["issue"]["number"],
+            p.get("issue", {}).get("title", "(title unavailable)"),
+            p.get("comment", {}).get("html_url", ""),
+            p.get("issue", {}).get("number", 0),
         ),
     ),
     "IssuesEvent": (
         # action e.g. opened / closed / reopened / edited
         lambda p: p.get("action", "acted"),  # type: ignore[return-value]
         lambda p, _: (
-            p["issue"]["title"],
-            p["issue"]["html_url"],
-            p["issue"]["number"],
+            p.get("issue", {}).get("title", "(title unavailable)"),
+            p.get("issue", {}).get("html_url", ""),
+            p.get("issue", {}).get("number", 0),
         ),
     ),
     "PullRequestEvent": (
