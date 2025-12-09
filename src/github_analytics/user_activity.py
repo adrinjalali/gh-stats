@@ -104,6 +104,11 @@ query($login: String!, $cursor: String) {
         repository {
           nameWithOwner
         }
+        labels(first: 10) {
+          nodes {
+            name
+          }
+        }
       }
     }
   }
@@ -131,6 +136,12 @@ query($login: String!, $cursor: String) {
         repository {
           nameWithOwner
         }
+        labels(first: 10) {
+          nodes {
+            name
+          }
+        }
+        reviewDecision
       }
     }
   }
@@ -151,6 +162,7 @@ query($login: String!, $from: DateTime!, $to: DateTime!, $cursor: String) {
           occurredAt
           pullRequestReview {
             url
+            state
           }
           pullRequest {
             number
@@ -160,6 +172,11 @@ query($login: String!, $from: DateTime!, $to: DateTime!, $cursor: String) {
             merged
             repository {
               nameWithOwner
+            }
+            labels(first: 10) {
+              nodes {
+                name
+              }
             }
           }
         }
@@ -351,6 +368,7 @@ def fetch_issue_comments(
                     "date": created,
                     "url": node["url"],
                     "item_url": issue["url"],
+                    "labels": [],
                 }
             )
 
@@ -379,6 +397,7 @@ def fetch_issues(token: str, login: str, since: datetime) -> list[dict[str, Any]
                 return results
 
             created = parse_datetime(node["createdAt"])
+            labels = [lbl["name"] for lbl in node.get("labels", {}).get("nodes", [])]
             results.append(
                 {
                     "repo": node["repository"]["nameWithOwner"],
@@ -390,6 +409,7 @@ def fetch_issues(token: str, login: str, since: datetime) -> list[dict[str, Any]
                     "date": created if created >= since else updated,
                     "url": node["url"],
                     "item_url": node["url"],
+                    "labels": labels,
                 }
             )
 
@@ -422,6 +442,8 @@ def fetch_pull_requests(
                 return results
 
             created = parse_datetime(node["createdAt"])
+            labels = [lbl["name"] for lbl in node.get("labels", {}).get("nodes", [])]
+            review_decision = node.get("reviewDecision", "")
             results.append(
                 {
                     "repo": node["repository"]["nameWithOwner"],
@@ -434,6 +456,8 @@ def fetch_pull_requests(
                     "date": created if created >= since else updated,
                     "url": node["url"],
                     "item_url": node["url"],
+                    "labels": labels,
+                    "review_decision": review_decision,
                 }
             )
 
@@ -471,6 +495,8 @@ def fetch_pr_reviews(token: str, login: str, since: datetime) -> list[dict[str, 
             occurred = parse_datetime(node["occurredAt"])
 
             review_url = node.get("pullRequestReview", {}).get("url", pr["url"])
+            review_state = node.get("pullRequestReview", {}).get("state", "")
+            labels = [lbl["name"] for lbl in pr.get("labels", {}).get("nodes", [])]
 
             results.append(
                 {
@@ -484,6 +510,8 @@ def fetch_pr_reviews(token: str, login: str, since: datetime) -> list[dict[str, 
                     "date": occurred,
                     "url": review_url,
                     "item_url": pr["url"],
+                    "labels": labels,
+                    "review_state": review_state,
                 }
             )
 
@@ -538,6 +566,7 @@ def fetch_pr_comments(token: str, login: str, since: datetime) -> list[dict[str,
                         "date": created,
                         "url": comment["url"],
                         "item_url": pr_node["url"],
+                        "labels": [],
                     }
                 )
 
@@ -583,6 +612,7 @@ def fetch_commits(token: str, login: str, since: datetime) -> list[dict[str, Any
                     "date": occurred,
                     "url": f"https://github.com/{repo_name}/commits?author={login}",
                     "item_url": f"https://github.com/{repo_name}",
+                    "labels": [],
                 }
             )
 
@@ -637,6 +667,7 @@ def fetch_pr_commits(token: str, login: str, since: datetime) -> list[dict[str, 
                         "date": committed,
                         "url": commit["url"],
                         "item_url": pr_node["url"],
+                        "labels": [],
                     }
                 )
 
@@ -652,8 +683,42 @@ def fetch_pr_commits(token: str, login: str, since: datetime) -> list[dict[str, 
 # ---------------------------------------------------------------------------
 
 
-def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
-    """Return a DataFrame of the user's engagements since *since* (UTC)."""
+def collect_single_user_activities(
+    token: str, user_login: str, since: datetime, progress: Progress, task_id: int
+) -> list[dict[str, Any]]:
+    """Collect all activities for a single user."""
+    all_activities: list[dict[str, Any]] = []
+
+    progress.update(task_id, description=f"[{user_login}] Fetching issue comments...")
+    all_activities.extend(fetch_issue_comments(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching issues...")
+    all_activities.extend(fetch_issues(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching pull requests...")
+    all_activities.extend(fetch_pull_requests(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching PR reviews...")
+    all_activities.extend(fetch_pr_reviews(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching PR comments...")
+    all_activities.extend(fetch_pr_comments(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching commits...")
+    all_activities.extend(fetch_commits(token, user_login, since))
+
+    progress.update(task_id, description=f"[{user_login}] Fetching PR commits...")
+    all_activities.extend(fetch_pr_commits(token, user_login, since))
+
+    # Add user field to all activities
+    for activity in all_activities:
+        activity["user"] = user_login
+
+    return all_activities
+
+
+def collect_user_engagements(user_logins: list[str], since: datetime) -> pl.DataFrame:
+    """Return a DataFrame of engagements for one or more users since *since* (UTC)."""
     token = get_github_token()
 
     # Verify authentication
@@ -661,7 +726,7 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
     auth_data = graphql_request(auth_query, {}, token)
     console.print(f"[green]Authenticated as {auth_data['viewer']['login']}[/green]")
 
-    # Collect all activities
+    # Collect all activities for all users
     all_activities: list[dict[str, Any]] = []
 
     with Progress(
@@ -670,28 +735,13 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Fetching issue comments...", total=None)
-        all_activities.extend(fetch_issue_comments(token, user_login, since))
-
-        progress.update(task, description="Fetching issues...")
-        all_activities.extend(fetch_issues(token, user_login, since))
-
-        progress.update(task, description="Fetching pull requests...")
-        all_activities.extend(fetch_pull_requests(token, user_login, since))
-
-        progress.update(task, description="Fetching PR reviews...")
-        all_activities.extend(fetch_pr_reviews(token, user_login, since))
-
-        progress.update(task, description="Fetching PR comments...")
-        all_activities.extend(fetch_pr_comments(token, user_login, since))
-
-        progress.update(task, description="Fetching commits...")
-        all_activities.extend(fetch_commits(token, user_login, since))
-
-        progress.update(task, description="Fetching PR commits...")
-        all_activities.extend(fetch_pr_commits(token, user_login, since))
-
-        progress.update(task, description="Processing results...")
+        for user_login in user_logins:
+            task = progress.add_task(f"[{user_login}] Starting...", total=None)
+            user_activities = collect_single_user_activities(
+                token, user_login, since, progress, task
+            )
+            all_activities.extend(user_activities)
+            progress.update(task, description=f"[{user_login}] Done!")
 
     if not all_activities:
         return pl.DataFrame()
@@ -704,6 +754,7 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
 
         rows.append(
             {
+                "user": activity["user"],
                 "repo": activity["repo"],
                 "number": activity["number"],
                 "type": f"{activity['type']} {status_char}",
@@ -711,6 +762,9 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
                 "involvement": activity["involvement"],
                 "date": activity["date"],
                 "url": activity["url"],
+                "labels": ",".join(activity.get("labels", [])),
+                "review_state": activity.get("review_state", ""),
+                "review_decision": activity.get("review_decision", ""),
             }
         )
 
@@ -724,18 +778,22 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
+def print_summary(df: pl.DataFrame, user_logins: list[str], since: datetime) -> None:
     """Pretty-print *df* to the terminal using rich."""
     if df.is_empty():
+        users_str = ", ".join(user_logins)
         console.print(
-            f"[yellow]No activity for {user_login} since {since:%Y-%m-%d}.\n[/yellow]"
+            f"[yellow]No activity for {users_str} since {since:%Y-%m-%d}.\n[/yellow]"
         )
         return
 
-    # Sort by repo, then by number, then by date within each item
-    df = df.sort(["repo", "number", "date"])
+    # Sort by user, repo, number, date
+    df = df.sort(["user", "repo", "number", "date"])
 
-    table = Table(title=f"GitHub activity for {user_login} since {since:%Y-%m-%d}")
+    users_str = ", ".join(user_logins)
+    table = Table(title=f"GitHub activity for {users_str} since {since:%Y-%m-%d}")
+    if len(user_logins) > 1:
+        table.add_column("User")
     table.add_column("Type")
     table.add_column("Repo#")
     table.add_column("Title")
@@ -744,15 +802,18 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
     table.add_column("Link")
 
     current_repo = None
-    current_item_key = None  # (repo, number) to track repeated items
+    current_item_key = None  # (user, repo, number) to track repeated items
 
     for row in df.iter_rows(named=True):
         # Add a separator row when repo changes
         if current_repo is not None and row["repo"] != current_repo:
-            table.add_row("", "", "", "", "", "")
+            if len(user_logins) > 1:
+                table.add_row("", "", "", "", "", "", "")
+            else:
+                table.add_row("", "", "", "", "", "")
         current_repo = row["repo"]
 
-        item_key = (row["repo"], row["number"])
+        item_key = (row["user"], row["repo"], row["number"])
         is_repeat = item_key == current_item_key
         current_item_key = item_key
 
@@ -767,16 +828,240 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
         # Shorten URL by removing the common prefix
         short_url = row["url"].replace("https://github.com/", "")
 
-        table.add_row(
-            row["type"],
-            repo_num,
-            title,
-            row["involvement"],
-            date_str,
-            short_url,
-        )
+        if len(user_logins) > 1:
+            table.add_row(
+                row["user"],
+                row["type"],
+                repo_num,
+                title,
+                row["involvement"],
+                date_str,
+                short_url,
+            )
+        else:
+            table.add_row(
+                row["type"],
+                repo_num,
+                title,
+                row["involvement"],
+                date_str,
+                short_url,
+            )
 
     console.print(table)
+
+
+def generate_html_report(
+    df: pl.DataFrame, user_logins: list[str], since: datetime, output_path: Path
+) -> None:
+    """Generate an interactive HTML visualization of user activity."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        console.print(
+            "[red]Plotly is required for HTML output. "
+            "Install with: pixi add plotly[/red]"
+        )
+        return
+
+    if df.is_empty():
+        console.print("[yellow]No data to generate HTML report.[/yellow]")
+        return
+
+    # Convert to pandas for plotly
+    pdf = df.to_pandas()
+
+    # Extract hour from datetime for color coding (time of day)
+    pdf["hour"] = pdf["date"].dt.hour
+    pdf["date_only"] = pdf["date"].dt.date
+
+    # Create a y-axis label combining repo and number
+    pdf["item"] = pdf.apply(
+        lambda r: f"{r['repo']}#{r['number']}" if r["number"] != 0 else r["repo"],
+        axis=1,
+    )
+
+    # Color mapping for involvement types
+    involvement_colors = {
+        "author": "#2ecc71",  # Green
+        "commented": "#3498db",  # Blue
+        "reviewed": "#9b59b6",  # Purple
+        "committed": "#e67e22",  # Orange
+    }
+
+    # Create the main figure
+    fig = go.Figure()
+
+    # Add traces for each involvement type
+    for involvement in pdf["involvement"].unique():
+        mask = pdf["involvement"] == involvement
+        subset = pdf[mask]
+
+        # Time of day affects opacity (darker = later)
+        opacities = 0.4 + (subset["hour"] / 24) * 0.6
+
+        hover_text = subset.apply(
+            lambda r: (
+                f"<b>{r['title']}</b><br>"
+                f"User: {r['user']}<br>"
+                f"Type: {r['type']}<br>"
+                f"Involvement: {r['involvement']}<br>"
+                f"Date: {r['date'].strftime('%Y-%m-%d %H:%M')}<br>"
+                f"Labels: {r['labels'] if r['labels'] else 'None'}<br>"
+                f"<a href='{r['url']}'>Open in GitHub</a>"
+            ),
+            axis=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=subset["date"],
+                y=subset["item"],
+                mode="markers",
+                name=involvement,
+                marker={
+                    "size": 12,
+                    "color": involvement_colors.get(involvement, "#95a5a6"),
+                    "opacity": opacities.tolist(),
+                    "line": {"width": 1, "color": "white"},
+                },
+                text=hover_text,
+                hoverinfo="text",
+                customdata=subset["url"].tolist(),
+            )
+        )
+
+    # Update layout
+    users_str = ", ".join(user_logins)
+    title_text = (
+        f"GitHub Activity Timeline: {users_str}<br>"
+        f"<sub>Since {since:%Y-%m-%d}</sub>"
+    )
+    fig.update_layout(
+        title={
+            "text": title_text,
+            "x": 0.5,
+        },
+        xaxis={
+            "title": "Date",
+            "type": "date",
+            "rangeslider": {"visible": True},
+            "rangeselector": {
+                "buttons": [
+                    {
+                        "count": 7,
+                        "label": "1w",
+                        "step": "day",
+                        "stepmode": "backward",
+                    },
+                    {
+                        "count": 14,
+                        "label": "2w",
+                        "step": "day",
+                        "stepmode": "backward",
+                    },
+                    {
+                        "count": 1,
+                        "label": "1m",
+                        "step": "month",
+                        "stepmode": "backward",
+                    },
+                    {"step": "all", "label": "All"},
+                ]
+            },
+        },
+        yaxis={
+            "title": "Repository / Issue / PR",
+            "categoryorder": "category ascending",
+        },
+        legend={
+            "title": "Activity Type",
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "right",
+            "x": 1,
+        },
+        hovermode="closest",
+        height=max(600, len(pdf["item"].unique()) * 25),
+    )
+
+    # Add JavaScript for click-to-open functionality
+    fig.update_traces(
+        marker={"symbol": "circle"},
+    )
+
+    # Generate HTML with custom JavaScript for clicking
+    html_content = fig.to_html(
+        include_plotlyjs=True,
+        full_html=True,
+        config={
+            "displayModeBar": True,
+            "scrollZoom": True,
+        },
+    )
+
+    # Add custom CSS and JavaScript for better interactivity
+    custom_head = """
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                         Roboto, sans-serif;
+        }
+        .filter-container {
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            margin: 10px;
+        }
+        .filter-container label { margin-right: 15px; cursor: pointer; }
+        .filter-container input[type="checkbox"] { margin-right: 5px; }
+        h2 { text-align: center; color: #333; }
+    </style>
+    """
+
+    # Insert filters before the plot
+    user_checkboxes = "".join(
+        f'<label><input type="checkbox" class="user-filter" '
+        f'value="{u}" checked> {u}</label>'
+        for u in user_logins
+    )
+    activity_checkboxes = "".join(
+        f'<label><input type="checkbox" class="activity-filter" '
+        f'value="{a}" checked> {a}</label>'
+        for a in pdf["involvement"].unique()
+    )
+    filter_html = f"""
+    <div class="filter-container">
+        <strong>Filter by User:</strong>
+        {user_checkboxes}
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <strong>Filter by Activity:</strong>
+        {activity_checkboxes}
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+            var plot = document.querySelector('.plotly-graph-div');
+            if (plot) {{
+                plot.on('plotly_click', function(data) {{
+                    var url = data.points[0].customdata;
+                    if (url) window.open(url, '_blank');
+                }});
+            }}
+        }});
+    </script>
+    """
+
+    # Insert custom content
+    html_content = html_content.replace("</head>", custom_head + "</head>")
+    html_content = html_content.replace(
+        '<div class="plotly-graph-div"', filter_html + '<div class="plotly-graph-div"'
+    )
+
+    # Write the file
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html_content)
+    console.print(f"[green]HTML report saved to {output_path}[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -786,29 +1071,54 @@ def print_summary(df: pl.DataFrame, user_login: str, since: datetime) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarize a user's recent GitHub engagements"
+        description="Summarize GitHub user activity with optional HTML visualization"
     )
-    parser.add_argument("--user", required=True, help="GitHub username (login)")
+    parser.add_argument(
+        "--user",
+        required=True,
+        help="GitHub username(s), comma-separated (e.g., 'alice,bob,charlie')",
+    )
     parser.add_argument(
         "--days", type=int, default=7, help="Look back N days (default 7)"
     )
     parser.add_argument(
         "--output", "-o", type=str, help="Output TSV file path (optional)"
     )
+    parser.add_argument("--html", type=str, help="Output HTML report path (optional)")
+    parser.add_argument(
+        "--no-table",
+        action="store_true",
+        help="Skip printing the table to console",
+    )
     args = parser.parse_args()
 
+    # Parse comma-separated users
+    user_logins = [u.strip() for u in args.user.split(",") if u.strip()]
+
+    if not user_logins:
+        console.print("[red]No valid usernames provided.[/red]")
+        return
+
     since = datetime.now(timezone.utc) - timedelta(days=args.days)
-    df = collect_user_engagements(args.user, since)
-    print_summary(df, args.user, since)
+    df = collect_user_engagements(user_logins, since)
+
+    # Print table unless --no-table is specified
+    if not args.no_table:
+        print_summary(df, user_logins, since)
 
     # Export to TSV if --output specified
     if args.output and not df.is_empty():
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        # Sort by repo, number, date for export
-        export_df = df.sort(["repo", "number", "date"])
+        # Sort by user, repo, number, date for export
+        export_df = df.sort(["user", "repo", "number", "date"])
         export_df.write_csv(out_path, separator="\t")
-        console.print(f"[green]Saved to {out_path}[/green]")
+        console.print(f"[green]TSV saved to {out_path}[/green]")
+
+    # Generate HTML report if --html specified
+    if args.html and not df.is_empty():
+        html_path = Path(args.html)
+        generate_html_report(df, user_logins, since, html_path)
 
 
 if __name__ == "__main__":
