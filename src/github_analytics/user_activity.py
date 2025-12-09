@@ -226,6 +226,44 @@ query($login: String!, $cursor: String) {
 }
 """
 
+# Query for commits on PRs by a user
+PR_COMMITS_QUERY = """
+query($login: String!, $cursor: String) {
+  user(login: $login) {
+    pullRequests(first: 100, after: $cursor, orderBy:
+        {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        url
+        state
+        merged
+        updatedAt
+        repository {
+          nameWithOwner
+        }
+        commits(first: 100) {
+          nodes {
+            commit {
+              author {
+                user { login }
+              }
+              committedDate
+              url
+              message
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -551,6 +589,64 @@ def fetch_commits(token: str, login: str, since: datetime) -> list[dict[str, Any
     return results
 
 
+def fetch_pr_commits(token: str, login: str, since: datetime) -> list[dict[str, Any]]:
+    """Fetch commits on PRs by the user since the given date."""
+    results = []
+    cursor = None
+    login_lower = login.lower()
+
+    while True:
+        data = graphql_request(
+            PR_COMMITS_QUERY, {"login": login, "cursor": cursor}, token
+        )
+        prs = data["user"]["pullRequests"]
+
+        for pr_node in prs["nodes"]:
+            if not pr_node:
+                continue
+
+            updated = parse_datetime(pr_node["updatedAt"])
+            if updated < since:
+                return results
+
+            # Check commits on this PR
+            for commit_node in pr_node.get("commits", {}).get("nodes", []):
+                if not commit_node or not commit_node.get("commit"):
+                    continue
+
+                commit = commit_node["commit"]
+                author = commit.get("author", {})
+                user = author.get("user") if author else None
+
+                if not user or user.get("login", "").lower() != login_lower:
+                    continue
+
+                committed = parse_datetime(commit["committedDate"])
+                if committed < since:
+                    continue
+
+                results.append(
+                    {
+                        "repo": pr_node["repository"]["nameWithOwner"],
+                        "number": pr_node["number"],
+                        "type": "PR",
+                        "state": pr_node["state"],
+                        "merged": pr_node.get("merged", False),
+                        "title": pr_node["title"],
+                        "involvement": "committed",
+                        "date": committed,
+                        "url": commit["url"],
+                        "item_url": pr_node["url"],
+                    }
+                )
+
+        if not prs["pageInfo"]["hasNextPage"]:
+            break
+        cursor = prs["pageInfo"]["endCursor"]
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
@@ -591,6 +687,9 @@ def collect_user_engagements(user_login: str, since: datetime) -> pl.DataFrame:
 
         progress.update(task, description="Fetching commits...")
         all_activities.extend(fetch_commits(token, user_login, since))
+
+        progress.update(task, description="Fetching PR commits...")
+        all_activities.extend(fetch_pr_commits(token, user_login, since))
 
         progress.update(task, description="Processing results...")
 
