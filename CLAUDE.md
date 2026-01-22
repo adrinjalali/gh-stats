@@ -21,6 +21,7 @@ pixi run releases        # Get last PyPI releases for tracked projects (pypi_las
 pixi run user-activity   # Summarize GitHub user activity (user_activity.py)
 pixi run weekly-pr-stats # Generate weekly PR statistics plot (weekly_pr_stats.py)
 pixi run build-database  # Build comprehensive SQLite database (build_project_database.py)
+pixi run board-activity  # Compare project board assignments with user activity (board_activity.py)
 
 # Linting
 pixi run lint            # Check code with ruff
@@ -54,6 +55,7 @@ pixi run format          # Format code with ruff
 - `weekly_pr_stats.py`: 10-year weekly PR trend visualization
 - `stale_prs.py`: Find PRs where author/reviewer activity diverges
 - `pypi_last_releases.py`: Track PyPI release dates
+- `board_activity.py`: Compare GitHub project board assignments (champion/reviewer) with actual user activity
 
 ## Configuration
 
