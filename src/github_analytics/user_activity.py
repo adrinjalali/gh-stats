@@ -244,10 +244,11 @@ query($login: String!, $cursor: String) {
 """
 
 # Query for commits on PRs by a user
+# Reduced page sizes to avoid GitHub API timeouts
 PR_COMMITS_QUERY = """
 query($login: String!, $cursor: String) {
   user(login: $login) {
-    pullRequests(first: 100, after: $cursor, orderBy:
+    pullRequests(first: 25, after: $cursor, orderBy:
         {field: UPDATED_AT, direction: DESC}) {
       pageInfo {
         hasNextPage
@@ -263,7 +264,7 @@ query($login: String!, $cursor: String) {
         repository {
           nameWithOwner
         }
-        commits(first: 100) {
+        commits(first: 50) {
           nodes {
             commit {
               author {
@@ -271,7 +272,6 @@ query($login: String!, $cursor: String) {
               }
               committedDate
               url
-              message
             }
           }
         }
@@ -295,23 +295,56 @@ def get_github_token() -> str:
     return token
 
 
-def graphql_request(query: str, variables: dict[str, Any], token: str) -> dict:
-    """Execute a GraphQL request and return the response data."""
+def graphql_request(
+    query: str,
+    variables: dict[str, Any],
+    token: str,
+    max_retries: int = 3,
+) -> dict:
+    """Execute a GraphQL request with retry logic for transient errors."""
+    import time
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    response = requests.post(
-        GRAPHQL_URL,
-        json={"query": query, "variables": variables},
-        headers=headers,
-        timeout=30,
-    )
-    response.raise_for_status()
-    result = response.json()
-    if "errors" in result:
-        raise RuntimeError(f"GraphQL errors: {result['errors']}")
-    return result["data"]
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers=headers,
+                timeout=60,  # Increased timeout
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "errors" in result:
+                raise RuntimeError(f"GraphQL errors: {result['errors']}")
+            return result["data"]
+        except requests.exceptions.HTTPError as e:
+            last_error = e
+            # Retry on 5xx errors (server-side issues)
+            if response.status_code >= 500:
+                wait_time = 2**attempt  # Exponential backoff: 1, 2, 4 seconds
+                console.print(
+                    f"[yellow]Server error {response.status_code}, "
+                    f"retrying in {wait_time}s...[/yellow]"
+                )
+                time.sleep(wait_time)
+                continue
+            raise
+        except requests.exceptions.Timeout as e:
+            last_error = e
+            wait_time = 2**attempt
+            console.print(
+                f"[yellow]Request timeout, retrying in {wait_time}s...[/yellow]"
+            )
+            time.sleep(wait_time)
+            continue
+
+    raise last_error  # type: ignore[misc]
 
 
 def parse_datetime(dt_str: str) -> datetime:
