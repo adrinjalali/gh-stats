@@ -9,6 +9,7 @@ Usage:
 
 Environment variables:
     ANTHROPIC_API_KEY: Required. Your Anthropic API key.
+    Can be set in .env file or as environment variable.
 """
 
 import argparse
@@ -16,17 +17,16 @@ import json
 import os
 import sys
 
-try:
-    import anthropic
-except ImportError:
-    print("Error: anthropic package not installed. Run: pip install anthropic")
-    sys.exit(1)
-
+import anthropic
+from dotenv import load_dotenv
 from generate_summaries import (
     list_items_needing_summaries,
     load_existing_summaries,
     save_summaries,
 )
+
+# Load environment variables from .env file if it exists
+load_dotenv()
 
 # System prompt for generating summaries
 SYSTEM_PROMPT = """\

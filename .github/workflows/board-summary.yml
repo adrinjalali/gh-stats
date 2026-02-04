@@ -32,14 +32,10 @@ jobs:
       - name: Install dependencies
         run: pixi install
 
-      - name: Set up environment
-        run: |
-          echo "GITHUB_TOKEN=${{ secrets.GH_PAT }}" > .env
-          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
-
       - name: Run board summary workflow
         env:
           PYTHONPATH: src
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           # Parse inputs
           USERS="${{ github.event.inputs.users }}"
@@ -74,6 +70,7 @@ jobs:
       - name: Regenerate report with summaries
         env:
           PYTHONPATH: src
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           # Parse inputs again
           USERS="${{ github.event.inputs.users }}"
