@@ -43,3 +43,13 @@ cache/
 
 # Ruff
 .ruff_cache/
+
+# Output files
+*.html
+*.db
+*.pdf
+*.png
+user_activities/
+
+# Claude
+.claude/

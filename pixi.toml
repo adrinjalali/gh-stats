@@ -33,3 +33,6 @@ seaborn = "*"
 sqlite = "*"
 plotly = "*"
 pandas = "*"
+
+[pypi-dependencies]
+anthropic = "*"

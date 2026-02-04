@@ -967,8 +967,7 @@ def generate_html_report(
     # Update layout
     users_str = ", ".join(user_logins)
     title_text = (
-        f"GitHub Activity Timeline: {users_str}<br>"
-        f"<sub>Since {since:%Y-%m-%d}</sub>"
+        f"GitHub Activity Timeline: {users_str}<br><sub>Since {since:%Y-%m-%d}</sub>"
     )
     fig.update_layout(
         title={

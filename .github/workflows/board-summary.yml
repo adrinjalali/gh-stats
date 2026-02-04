@@ -1,0 +1,134 @@
+name: Generate Board Summary
+
+on:
+  schedule:
+    # Run daily at 5am UTC
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      users:
+        description: 'Comma-separated list of GitHub usernames (leave empty for all board users)'
+        required: false
+        default: ''
+      lookback_days:
+        description: 'Number of days to look back for activity'
+        required: false
+        default: '14'
+
+jobs:
+  generate-summary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout gh-stats repo
+        uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.39.5
+          cache: true
+
+      - name: Install dependencies
+        run: pixi install
+
+      - name: Set up environment
+        run: |
+          echo "GITHUB_TOKEN=${{ secrets.GH_PAT }}" > .env
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
+
+      - name: Run board summary workflow
+        env:
+          PYTHONPATH: src
+        run: |
+          # Parse inputs
+          USERS="${{ github.event.inputs.users }}"
+          LOOKBACK="${{ github.event.inputs.lookback_days }}"
+
+          # Set defaults for scheduled runs
+          if [ -z "$LOOKBACK" ]; then
+            LOOKBACK="14"
+          fi
+
+          # Build command
+          CMD="pixi run python src/github_analytics/board_summary/run_board_summary.py"
+
+          if [ -n "$USERS" ]; then
+            # Convert comma-separated to space-separated
+            USERS_ARGS=$(echo "$USERS" | tr ',' ' ')
+            CMD="$CMD $USERS_ARGS"
+          fi
+
+          CMD="$CMD --lookback $LOOKBACK"
+
+          echo "Running: $CMD"
+          $CMD
+
+      - name: Generate AI summaries
+        env:
+          PYTHONPATH: src
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          pixi run python src/github_analytics/board_summary/generate_summaries_api.py
+
+      - name: Regenerate report with summaries
+        env:
+          PYTHONPATH: src
+        run: |
+          # Parse inputs again
+          USERS="${{ github.event.inputs.users }}"
+          LOOKBACK="${{ github.event.inputs.lookback_days }}"
+
+          if [ -z "$LOOKBACK" ]; then
+            LOOKBACK="14"
+          fi
+
+          CMD="pixi run python src/github_analytics/board_summary/run_board_summary.py"
+
+          if [ -n "$USERS" ]; then
+            USERS_ARGS=$(echo "$USERS" | tr ',' ' ')
+            CMD="$CMD $USERS_ARGS"
+          fi
+
+          CMD="$CMD --lookback $LOOKBACK --skip-fetch"
+
+          echo "Running: $CMD"
+          $CMD
+
+      - name: Prepare reports for publishing
+        run: |
+          mkdir -p reports
+          cp board_summary.html reports/
+          cp reports/board_summary.html reports/index.html
+
+          # Create a dated copy for history
+          DATE=$(date +%Y-%m-%d)
+          cp board_summary.html "reports/board_summary_${DATE}.html"
+
+      - name: Checkout reports repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.REPORTS_REPO }}
+          token: ${{ secrets.REPORTS_REPO_PAT }}
+          path: reports-repo
+
+      - name: Copy reports and push
+        run: |
+          # Copy new reports
+          cp -r reports/* reports-repo/
+
+          cd reports-repo
+
+          # Configure git
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+          # Commit and push
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            DATE=$(date +%Y-%m-%d)
+            git commit -m "Update board summary report - ${DATE}"
+            git push
+          fi

@@ -68,7 +68,7 @@ def handle_rate_limit(g: Github) -> None:
         sleep_time = (reset_time - datetime.now(timezone.utc)).total_seconds() + 60
         console.print(
             f"[yellow]Rate limit low ({rate_limit.core.remaining} remaining). "
-            f"Sleeping for {sleep_time/60:.1f} minutes...[/yellow]"
+            f"Sleeping for {sleep_time / 60:.1f} minutes...[/yellow]"
         )
         time.sleep(sleep_time)
 
@@ -281,7 +281,7 @@ def create_weekly_plot(weekly_df: pl.DataFrame, repo_name: str) -> None:
 
     # Set up the plot style
     plt.style.use("seaborn-v0_8")
-    fig, ax = plt.subplots(figsize=(16, 10))
+    _fig, ax = plt.subplots(figsize=(16, 10))
 
     # Create the plot
     ax.plot(

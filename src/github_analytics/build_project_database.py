@@ -13,7 +13,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
-from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+from requests.exceptions import ChunkedEncodingError, Timeout
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -114,7 +115,7 @@ class GitHubGraphQLClient:
                     )
                     response.raise_for_status()
 
-            except (ChunkedEncodingError, ConnectionError, Timeout) as e:
+            except (ChunkedEncodingError, RequestsConnectionError, Timeout) as e:
                 if attempt < max_retries:
                     wait_time = (2**attempt) + 1  # Exponential backoff
                     console.print(
@@ -335,7 +336,7 @@ def update_sync_progress(conn: sqlite3.Connection, repo_name: str, **kwargs):
         values.append(repo_name)
         cursor.execute(
             f"""
-            UPDATE sync_progress SET {', '.join(updates)} WHERE repo_name = ?
+            UPDATE sync_progress SET {", ".join(updates)} WHERE repo_name = ?
         """,
             values,
         )
@@ -818,7 +819,7 @@ def fetch_all_prs(
             "remaining[/blue]"
         )
         console.print(
-            "[dim]Using saved pagination cursor to continue from last position" "[/dim]"
+            "[dim]Using saved pagination cursor to continue from last position[/dim]"
         )
         query = get_prs_query()
     elif already_processed > 0:
@@ -994,7 +995,7 @@ def fetch_all_issues(
             "remaining[/blue]"
         )
         console.print(
-            "[dim]Using saved pagination cursor to continue from last position" "[/dim]"
+            "[dim]Using saved pagination cursor to continue from last position[/dim]"
         )
         query = get_issues_query()
     elif already_processed > 0:
@@ -1107,7 +1108,7 @@ def fetch_all_issues(
                     progress_bar.update(
                         task,
                         description=(
-                            "Skipping already fetched issues (last: " f"#{last_issue})"
+                            f"Skipping already fetched issues (last: #{last_issue})"
                         ),
                     )
 
