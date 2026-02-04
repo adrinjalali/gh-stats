@@ -14,6 +14,7 @@ user-activity = "PYTHONPATH=src python -m github_analytics.user_activity"
 weekly-pr-stats = "python src/github_analytics/weekly_pr_stats.py"
 build-database = "python src/github_analytics/build_project_database.py"
 board-activity = "PYTHONPATH=src python -m github_analytics.board_activity"
+board-summary = { cmd = "python src/github_analytics/board_summary/generate_all_reports.py", env = { PYTHONPATH = "src/github_analytics/board_summary" } }
 lint = "ruff check ."
 format = "ruff format ."
 lint-fix = "ruff check --fix ."

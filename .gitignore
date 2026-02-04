@@ -50,6 +50,7 @@ cache/
 *.pdf
 *.png
 user_activities/
+reports/
 
 # Claude
 .claude/
