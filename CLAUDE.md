@@ -57,6 +57,46 @@ pixi run format          # Format code with ruff
 - `pypi_last_releases.py`: Track PyPI release dates
 - `board_activity.py`: Compare GitHub project board assignments (champion/reviewer) with actual user activity
 
+## Code Style (IMPORTANT - follow these rules when writing code)
+
+This project uses `ruff` for linting and formatting. Pre-commit hooks enforce these rules.
+
+### Key Rules
+- **Line length**: 88 characters max
+- **Quotes**: Double quotes for strings
+- **Indentation**: 4 spaces (no tabs)
+- **Python version**: 3.9+ (use modern syntax like `list[str]` not `List[str]`)
+
+### Import Organization (isort style)
+Imports must be sorted in this order, with blank lines between groups:
+1. Standard library (`import os`, `import sys`)
+2. Third-party packages (`import anthropic`, `from dotenv import load_dotenv`)
+3. Local imports (`from generate_summaries import ...`)
+
+```python
+# Correct example:
+import argparse
+import json
+import os
+
+import anthropic
+from dotenv import load_dotenv
+
+from mymodule import myfunction
+```
+
+### Common Pitfalls to Avoid
+- **E501**: Lines over 88 chars - break long strings/expressions
+- **F841**: Unused variables - prefix with `_` if intentionally unused (e.g., `_fig, ax = plt.subplots()`)
+- **A004**: Don't shadow builtins - use `from requests.exceptions import ConnectionError as RequestsConnectionError`
+- **B007**: Unused loop variables - use `for _item in items:` if not using the variable
+- **SIM102**: Combine nested `if` statements when possible
+- **C401**: Use set comprehensions `{x for x in items}` not `set(x for x in items)`
+- **I001**: Keep imports sorted (run `pixi run lint-fix` to auto-fix)
+
+### Before Committing
+Run `pixi run format && pixi run lint` to check for issues. Most can be auto-fixed with `pixi run lint-fix`.
+
 ## Configuration
 
 - `ruff.toml`: Linting rules - line length 88, Python 3.9+ target
