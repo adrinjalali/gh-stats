@@ -26,6 +26,23 @@ jobs:
       - name: Checkout gh-stats repo
         uses: actions/checkout@v4
 
+      - name: Checkout reports repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.REPORTS_REPO }}
+          token: ${{ secrets.REPORTS_REPO_PAT }}
+          path: reports-repo
+
+      - name: Restore cached summaries
+        run: |
+          # Copy existing summaries.json from reports repo if it exists
+          if [ -f reports-repo/summaries.json ]; then
+            cp reports-repo/summaries.json src/github_analytics/board_summary/summaries.json
+            echo "Restored $(wc -l < src/github_analytics/board_summary/summaries.json) lines of cached summaries"
+          else
+            echo "No cached summaries found, will generate all"
+          fi
+
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@v0.8.1
         with:
@@ -67,26 +84,43 @@ jobs:
           echo "Running: $CMD"
           $CMD
 
-          # Create index.html pointing to latest combined report
+          # Create index.html redirecting to latest combined report
           LATEST=$(ls -t ${OUTPUT_DIR}/board_summary_*_all.html 2>/dev/null | head -1 || \
                    ls -t ${OUTPUT_DIR}/board_summary_*.html 2>/dev/null | head -1)
           if [ -n "$LATEST" ]; then
-            cp "$LATEST" reports/index.html
+            LATEST_BASENAME=$(basename "$LATEST")
+            LATEST_DIR=$(basename "$(dirname "$LATEST")")
+            cat > reports/index.html << HTMLEOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta http-equiv="refresh" content="0; url=${LATEST_DIR}/${LATEST_BASENAME}">
+            <title>Redirecting...</title>
+          </head>
+          <body>
+            <p>Redirecting to <a href="${LATEST_DIR}/${LATEST_BASENAME}">latest report</a>...</p>
+          </body>
+          </html>
+          HTMLEOF
+            echo "Created index.html pointing to ${LATEST_DIR}/${LATEST_BASENAME}"
           fi
 
-      - name: Checkout reports repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.REPORTS_REPO }}
-          token: ${{ secrets.REPORTS_REPO_PAT }}
-          path: reports-repo
-
-      - name: Copy reports and push
+      - name: Copy reports and cleanup old files
         run: |
-          # Copy new reports
+          # Copy new reports to reports-repo
           cp -r reports/* reports-repo/
 
+          # Copy updated summaries.json to reports repo for caching
+          if [ -f src/github_analytics/board_summary/summaries.json ]; then
+            cp src/github_analytics/board_summary/summaries.json reports-repo/summaries.json
+            echo "Saved summaries.json for future runs"
+          fi
+
           cd reports-repo
+
+          # Cleanup report directories older than 30 days
+          echo "Cleaning up old report directories..."
+          find . -maxdepth 1 -type d -name "20*_*d" -mtime +30 -print -exec rm -rf {} \; 2>/dev/null || true
 
           # Configure git
           git config user.name "GitHub Actions Bot"
