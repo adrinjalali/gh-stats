@@ -47,6 +47,7 @@ def get_items_for_user(items: list[dict], user: str) -> list[dict]:
 
 STATUS_CONFIG = {
     # AI status values (preferred when available)
+    "Merged": {"emoji": "🟣", "color": "#6f42c1", "priority": 0},
     "Ready to merge": {"emoji": "✅", "color": "#22863a", "priority": 1},
     "Needs minor work": {"emoji": "🟡", "color": "#dbab09", "priority": 2},
     "In progress": {"emoji": "🔵", "color": "#0366d6", "priority": 3},
@@ -121,9 +122,12 @@ def generate_html_report(users: list[str] | None = None) -> str:
         seen_items.add(item_key)
 
         # Use AI status when available, fall back to computed status
+        # Always prioritize "Merged" computed status over AI status
         ai_status = item.get("ai_status", "")
         computed_status = item.get("computed_status", "Unknown")
-        if ai_status and ai_status in STATUS_CONFIG:
+        if computed_status == "Merged":
+            status_key = "Merged"
+        elif ai_status and ai_status in STATUS_CONFIG:
             status_key = ai_status
         else:
             status_key = computed_status.split(" from ")[0]
@@ -596,6 +600,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
             font-weight: 500;
             margin-bottom: 8px;
         }}
+        .ai-status.merged {{ background: #f5f0ff; color: #6f42c1; }}
         .ai-status.ready {{ background: #dcffe4; color: #22863a; }}
         .ai-status.minor {{ background: #fff8c5; color: #9a6700; }}
         .ai-status.progress {{ background: #ddf4ff; color: #0366d6; }}
@@ -878,6 +883,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
         function getAiStatusClass(status) {{
             if (!status) return '';
             const s = status.toLowerCase();
+            if (s.includes('merged')) return 'merged';
             if (s.includes('ready')) return 'ready';
             if (s.includes('minor')) return 'minor';
             if (s.includes('progress')) return 'progress';

@@ -126,6 +126,11 @@ def determine_status(item: dict, details: dict | None) -> tuple[str, str, list[s
     if not details:
         return "Unknown", "gray", []
 
+    # Check if PR is already merged
+    state = details.get("state", "")
+    if state == "MERGED":
+        return "Merged", "purple", []
+
     now = datetime.now()
     updated_str = details.get("updatedAt", "")
     if updated_str:

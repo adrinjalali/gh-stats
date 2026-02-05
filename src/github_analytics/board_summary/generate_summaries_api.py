@@ -40,10 +40,11 @@ For each item, generate a JSON object with these fields:
 - action_reason: A brief explanation of why action is needed (or empty if none)
 
 Valid ai_status values:
-"Ready to merge", "Needs minor work", "In progress", "Blocked",
+"Merged", "Ready to merge", "Needs minor work", "In progress", "Blocked",
 "Needs review", "Stale", "Needs discussion", "Waiting for author"
 
 Status definitions:
+- Merged: PR has been merged (state is MERGED)
 - Ready to merge: Has approvals, CI passing, no blockers
 - Needs minor work: Small changes needed before merge
 - In progress: Active development ongoing
