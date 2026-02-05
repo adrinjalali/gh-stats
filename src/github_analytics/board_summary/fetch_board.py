@@ -144,13 +144,15 @@ def determine_status(item: dict, details: dict | None) -> tuple[str, str, list[s
     pending_reviewers = [r.get("login", "") for r in review_requests if r.get("login")]
 
     recent_reviews = reviews[-5:] if reviews else []
-    approved = any(r.get("state") == "APPROVED" for r in recent_reviews)
+    approval_count = sum(1 for r in recent_reviews if r.get("state") == "APPROVED")
     changes_requested = any(
         r.get("state") == "CHANGES_REQUESTED" for r in recent_reviews
     )
 
-    if approved and not changes_requested:
+    if approval_count >= 2 and not changes_requested:
         return "Ready to merge", "green", pending_reviewers
+    elif approval_count == 1 and not changes_requested:
+        return "Needs second review or ready to merge", "teal", pending_reviewers
     elif changes_requested:
         return "Waiting for author", "orange", pending_reviewers
     elif pending_reviewers:

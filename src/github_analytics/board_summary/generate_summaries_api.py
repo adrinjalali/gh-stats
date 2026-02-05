@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 
 import anthropic
 from dotenv import load_dotenv
@@ -40,12 +41,14 @@ For each item, generate a JSON object with these fields:
 - action_reason: A brief explanation of why action is needed (or empty if none)
 
 Valid ai_status values:
-"Merged", "Ready to merge", "Needs minor work", "In progress", "Blocked",
-"Needs review", "Stale", "Needs discussion", "Waiting for author"
+"Merged", "Ready to merge", "Needs second review or ready to merge",
+"Needs minor work", "In progress", "Blocked", "Needs review", "Stale",
+"Needs discussion", "Waiting for author"
 
 Status definitions:
 - Merged: PR has been merged (state is MERGED)
-- Ready to merge: Has approvals, CI passing, no blockers
+- Ready to merge: Has multiple approvals, CI passing, no blockers
+- Needs second review or ready to merge: Has one approval, may need second review
 - Needs minor work: Small changes needed before merge
 - In progress: Active development ongoing
 - Blocked: Cannot proceed due to external dependency or decision needed
@@ -166,6 +169,8 @@ def generate_summaries(max_items: int = 50, model: str = "claude-sonnet-4-202505
 
         try:
             summary = generate_summary_for_item(client, item, model)
+            # Add timestamp for staleness checking
+            summary["generated_at"] = datetime.now().strftime("%Y-%m-%d")
             new_summaries[item_id] = summary
             print(f"    -> {summary['ai_status']}")
         except Exception as e:

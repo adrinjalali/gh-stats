@@ -49,6 +49,11 @@ STATUS_CONFIG = {
     # AI status values (preferred when available)
     "Merged": {"emoji": "🟣", "color": "#6f42c1", "priority": 0},
     "Ready to merge": {"emoji": "✅", "color": "#22863a", "priority": 1},
+    "Needs second review or ready to merge": {
+        "emoji": "🔷",
+        "color": "#17a2b8",
+        "priority": 1.5,
+    },
     "Needs minor work": {"emoji": "🟡", "color": "#dbab09", "priority": 2},
     "In progress": {"emoji": "🔵", "color": "#0366d6", "priority": 3},
     "Needs review": {"emoji": "🟠", "color": "#e36209", "priority": 4},
@@ -601,6 +606,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
             margin-bottom: 8px;
         }}
         .ai-status.merged {{ background: #f5f0ff; color: #6f42c1; }}
+        .ai-status.second-review {{ background: #d1ecf1; color: #0c5460; }}
         .ai-status.ready {{ background: #dcffe4; color: #22863a; }}
         .ai-status.minor {{ background: #fff8c5; color: #9a6700; }}
         .ai-status.progress {{ background: #ddf4ff; color: #0366d6; }}
@@ -884,6 +890,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
             if (!status) return '';
             const s = status.toLowerCase();
             if (s.includes('merged')) return 'merged';
+            if (s.includes('second review')) return 'second-review';
             if (s.includes('ready')) return 'ready';
             if (s.includes('minor')) return 'minor';
             if (s.includes('progress')) return 'progress';

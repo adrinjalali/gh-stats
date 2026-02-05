@@ -53,14 +53,27 @@ def get_item_id(item: dict) -> str:
 
 
 def list_items_needing_summaries(max_items: int = 50) -> list[dict]:
-    """List items that need summaries."""
+    """List items that need summaries (new or updated since last summary)."""
     items = load_board_items()
     existing = load_existing_summaries()
 
     needs_summary = []
     for item in items:
         item_id = get_item_id(item)
+        item_updated = item.get("updated_at", "")
+
+        # Check if item needs a new or updated summary
+        needs_new = False
         if item_id not in existing:
+            needs_new = True
+        else:
+            # Check if item was updated after summary was generated
+            summary = existing[item_id]
+            summary_generated = summary.get("generated_at", "")
+            if item_updated and summary_generated and item_updated > summary_generated:
+                needs_new = True
+
+        if needs_new:
             needs_summary.append(
                 {
                     "id": item_id,
