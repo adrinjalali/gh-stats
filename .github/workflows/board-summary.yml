@@ -27,11 +27,31 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout reports repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.REPORTS_REPO }}
-          token: ${{ secrets.REPORTS_REPO_PAT }}
-          path: reports-repo
+        env:
+          REPORTS_REPO_PAT: ${{ secrets.REPORTS_REPO_PAT }}
+          REPORTS_REPO: ${{ secrets.REPORTS_REPO }}
+        run: |
+          # Clone reports repo, handling empty repos
+          git clone "https://x-access-token:${REPORTS_REPO_PAT}@github.com/${REPORTS_REPO}.git" reports-repo || {
+            echo "Clone failed, creating fresh directory"
+            mkdir -p reports-repo
+            cd reports-repo
+            git init
+            git remote add origin "https://x-access-token:${REPORTS_REPO_PAT}@github.com/${REPORTS_REPO}.git"
+          }
+
+          # If repo is empty (no commits), initialize it
+          cd reports-repo
+          if ! git rev-parse HEAD >/dev/null 2>&1; then
+            echo "Empty repo detected, initializing..."
+            echo "# Board Summary Reports" > README.md
+            git add README.md
+            git config user.name "GitHub Actions Bot"
+            git config user.email "actions@github.com"
+            git commit -m "Initialize reports repository"
+            git branch -M main
+            git push -u origin main
+          fi
 
       - name: Restore cached summaries
         run: |
@@ -106,6 +126,9 @@ jobs:
           fi
 
       - name: Copy reports and cleanup old files
+        env:
+          REPORTS_REPO_PAT: ${{ secrets.REPORTS_REPO_PAT }}
+          REPORTS_REPO: ${{ secrets.REPORTS_REPO }}
         run: |
           # Copy new reports to reports-repo
           cp -r reports/* reports-repo/
@@ -126,6 +149,9 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
 
+          # Ensure we have the remote URL with token for push
+          git remote set-url origin "https://x-access-token:${REPORTS_REPO_PAT}@github.com/${REPORTS_REPO}.git"
+
           # Commit and push
           git add .
           if git diff --staged --quiet; then
@@ -137,5 +163,5 @@ jobs:
               LOOKBACK="14"
             fi
             git commit -m "Board summary reports - ${DATE} (${LOOKBACK} days)"
-            git push
+            git push -u origin main
           fi
