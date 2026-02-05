@@ -53,7 +53,7 @@ def generate_ai_summaries():
         print("\n" + "=" * 50)
         print("Generating AI summaries")
         print("=" * 50)
-        generate_summaries(max_items=200)
+        generate_summaries(max_items=500)
     except Exception as e:
         print(f"Warning: Could not generate AI summaries: {e}")
         print("Continuing without new summaries...")
