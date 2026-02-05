@@ -17,6 +17,7 @@ Examples:
 """
 
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,11 @@ from merge_activity import INCLUDED_REPOS, merge_activity_with_board
 
 # Load environment variables
 load_dotenv()
+
+# Use GH_PAT for GitHub authentication (same name as GitHub Actions secret)
+# Export as GITHUB_TOKEN for gh CLI compatibility
+if os.environ.get("GH_PAT"):
+    os.environ["GITHUB_TOKEN"] = os.environ["GH_PAT"]
 
 SUMMARIES_FILE = Path(__file__).parent / "summaries.json"
 CACHE_DIR = Path("cache/board_summary")

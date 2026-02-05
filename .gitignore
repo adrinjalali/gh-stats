@@ -52,5 +52,9 @@ cache/
 user_activities/
 reports/
 
+# Generated data
+src/github_analytics/board_summary/summaries.json
+src/github_analytics/board_summary/items_for_summary.txt
+
 # Claude
 .claude/

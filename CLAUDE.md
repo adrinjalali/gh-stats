@@ -41,7 +41,9 @@ pixi run format          # Format code with ruff
 - **CSV files**: For certain caches like stale PR data
 
 ### Key Patterns
-- All scripts use `python-dotenv` to load `GITHUB_TOKEN` from `.env`
+- Scripts use `python-dotenv` to load env vars from `.env`:
+  - `GH_PAT`: GitHub token for project board and repo access
+  - `ANTHROPIC_API_KEY`: For AI summary generation
 - Rich library used throughout for terminal output (tables, progress bars)
 - Polars (not Pandas) is the primary DataFrame library
 - Scripts support graceful interruption (SIGINT/SIGTERM) with progress saving
