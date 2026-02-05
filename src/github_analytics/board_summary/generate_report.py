@@ -185,6 +185,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
                 "status_color": config["color"],
                 "status_priority": config["priority"],
                 "author": item.get("author", ""),
+                "created": item.get("created_at", ""),
                 "updated": item.get("updated_at", ""),
                 "summary": item.get("summary", ""),
                 "ai_status": item.get("ai_status", ""),
@@ -369,6 +370,12 @@ def generate_html_report(users: list[str] | None = None) -> str:
         tr:hover {{ background: #f6f8fa; }}
         .link {{ color: #0366d6; text-decoration: none; }}
         .link:hover {{ text-decoration: underline; }}
+        .type-icon {{
+            vertical-align: middle;
+            margin-right: 4px;
+        }}
+        .type-icon.pr {{ color: #8250df; }}
+        .type-icon.issue {{ color: #1a7f37; }}
         .status {{
             display: inline-flex;
             align-items: center;
@@ -722,6 +729,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
                         <th data-col="board_status">Board</th>
                         <th data-col="status" data-sort="priority">Status</th>
                         <th data-col="author">Author</th>
+                        <th data-col="age">Age</th>
                         <th data-col="updated">Updated</th>
                     </tr>
                 </thead>
@@ -794,6 +802,10 @@ def generate_html_report(users: list[str] | None = None) -> str:
                             aVal = a.board_status.toLowerCase();
                             bVal = b.board_status.toLowerCase();
                         }}
+                    }} else if (col === 'age') {{
+                        // Sort by created date (older = higher value for ascending)
+                        aVal = a.created || '9999';
+                        bVal = b.created || '9999';
                     }} else {{
                         aVal = (a[col] || '').toLowerCase();
                         bVal = (b[col] || '').toLowerCase();
@@ -807,17 +819,18 @@ def generate_html_report(users: list[str] | None = None) -> str:
 
             tbody.innerHTML = filtered.map((r, idx) => `
                 <tr class="expandable" data-idx="${{idx}}">
-                    <td><span class="expand-arrow">▶</span> <a class="link" href="${{r.url}}" target="_blank">${{r.item}}</a></td>
+                    <td><span class="expand-arrow">▶</span> ${{getTypeIcon(r.type)}} <a class="link" href="${{r.url}}" target="_blank">${{r.item}}</a></td>
                     <td><a class="link" href="${{r.url}}" target="_blank">${{escapeHtml(r.title)}}</a></td>
                     <td class="assigned">${{formatAssigned(r)}}</td>
                     <td class="assigned">${{formatNeedsAction(r)}}</td>
                     <td><span class="board-badge ${{getBoardBadgeClass(r.board_status)}}">${{r.board_status}}</span></td>
                     <td><span class="status" style="background: ${{r.status_color}}20; color: ${{r.status_color}}">${{r.status_emoji}} ${{r.status}}</span></td>
                     <td>${{r.author}}</td>
+                    <td>${{formatAge(r.created)}}</td>
                     <td>${{r.updated}}</td>
                 </tr>
                 <tr class="summary-row" data-idx="${{idx}}">
-                    <td colspan="8">
+                    <td colspan="9">
                         ${{formatSummaryContent(r)}}
                     </td>
                 </tr>
@@ -842,6 +855,32 @@ def generate_html_report(users: list[str] | None = None) -> str:
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }}
+
+        function getTypeIcon(type) {{
+            if (type === 'PullRequest') {{
+                return '<svg class="type-icon pr" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"></path></svg>';
+            }} else {{
+                return '<svg class="type-icon issue" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"></path><path fill="currentColor" d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"></path></svg>';
+            }}
+        }}
+
+        function formatAge(createdDate) {{
+            if (!createdDate) return '-';
+            const created = new Date(createdDate);
+            const now = new Date();
+            const diffMs = now - created;
+            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+            if (diffDays < 1) return 'today';
+            if (diffDays === 1) return '1 day';
+            if (diffDays < 7) return `${{diffDays}} days`;
+            if (diffDays < 14) return '1 week';
+            if (diffDays < 30) return `${{Math.floor(diffDays / 7)}} weeks`;
+            if (diffDays < 60) return '1 month';
+            if (diffDays < 365) return `${{Math.floor(diffDays / 30)}} months`;
+            if (diffDays < 730) return '1 year';
+            return `${{Math.floor(diffDays / 365)}} years`;
         }}
 
         function formatAssigned(r) {{
