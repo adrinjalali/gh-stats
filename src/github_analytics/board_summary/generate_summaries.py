@@ -74,24 +74,30 @@ def list_items_needing_summaries(max_items: int = 50) -> list[dict]:
                 needs_new = True
 
         if needs_new:
-            needs_summary.append(
-                {
-                    "id": item_id,
-                    "title": item.get("title", ""),
-                    "type": item.get("type", ""),
-                    "url": item.get("url", ""),
-                    "author": item.get("author", ""),
-                    "state": item.get("state", ""),
-                    "board_status": item.get("board_status", ""),
-                    "computed_status": item.get("computed_status", ""),
-                    "champion": item.get("champion", ""),
-                    "reviewer1": item.get("reviewer1", ""),
-                    "reviewer2": item.get("reviewer2", ""),
-                    "updated_at": item.get("updated_at", ""),
-                    "created_at": item.get("created_at", ""),
-                    "recent_activity": item.get("recent_activity", [])[:5],
-                }
-            )
+            item_data = {
+                "id": item_id,
+                "title": item.get("title", ""),
+                "type": item.get("type", ""),
+                "url": item.get("url", ""),
+                "author": item.get("author", ""),
+                "state": item.get("state", ""),
+                "board_status": item.get("board_status", ""),
+                "computed_status": item.get("computed_status", ""),
+                "champion": item.get("champion", ""),
+                "reviewer1": item.get("reviewer1", ""),
+                "reviewer2": item.get("reviewer2", ""),
+                "updated_at": item.get("updated_at", ""),
+                "created_at": item.get("created_at", ""),
+                "recent_activity": item.get("recent_activity", [])[:5],
+            }
+
+            # Include linked PRs for issues - important context for summaries
+            # Much of the discussion on issues often happens in linked PRs
+            linked_prs = item.get("linked_prs", [])
+            if linked_prs:
+                item_data["linked_prs"] = linked_prs
+
+            needs_summary.append(item_data)
 
     return needs_summary[:max_items]
 

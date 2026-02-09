@@ -107,7 +107,15 @@ def enrich_activity_item(item: dict) -> dict:
     if item["type"] == "PullRequest":
         details = fetch_pr_details(repo, number)
     else:
-        details = fetch_issue_details(repo, number)
+        # Items from issue_comments could be issues OR PRs (PRs are issues in GitHub)
+        # Try fetching as PR first - if it succeeds, it's a PR
+        pr_details = fetch_pr_details(repo, number)
+        if pr_details:
+            item["type"] = "PullRequest"
+            details = pr_details
+        else:
+            # It's a real issue
+            details = fetch_issue_details(repo, number)
 
     status, status_color, pending_reviewers = determine_status(item, details)
 

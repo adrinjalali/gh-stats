@@ -121,15 +121,104 @@ def fetch_issue_details(repo: str, number: int) -> dict | None:
     return None
 
 
+def fetch_linked_prs(repo: str, number: int) -> list[dict]:
+    """Fetch PRs linked to an issue using GraphQL API.
+
+    Returns list of linked PRs with their recent activity (reviews, comments).
+    This is useful for issues where much of the discussion happens in linked PRs.
+    """
+    owner, name = repo.split("/", 1) if "/" in repo else ("", repo)
+
+    query = """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], first: 10) {
+            nodes {
+              ... on CrossReferencedEvent {
+                source {
+                  ... on PullRequest {
+                    number
+                    title
+                    state
+                    url
+                    reviews(last: 5) {
+                      nodes {
+                        author { login }
+                        state
+                        body
+                        submittedAt
+                      }
+                    }
+                    comments(last: 5) {
+                      nodes {
+                        author { login }
+                        body
+                        createdAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"number={number}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            nodes = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("issue", {})
+                .get("timelineItems", {})
+                .get("nodes", [])
+            )
+
+            linked_prs = []
+            for node in nodes:
+                source = node.get("source", {})
+                if source and source.get("number"):  # Only include valid PRs
+                    linked_prs.append(source)
+
+            return linked_prs
+    except Exception:
+        pass
+    return []
+
+
 def determine_status(item: dict, details: dict | None) -> tuple[str, str, list[str]]:
     """Determine the status of an item based on activity."""
     if not details:
         return "Unknown", "gray", []
 
-    # Check if PR is already merged
+    # Check if item is merged or closed
     state = details.get("state", "")
     if state == "MERGED":
         return "Merged", "purple", []
+    if state == "CLOSED":
+        return "Closed", "gray", []
 
     now = datetime.now()
     updated_str = details.get("updatedAt", "")
@@ -206,8 +295,11 @@ def enrich_item(item: dict, all_users: set[str]) -> dict:
 
     if item["type"] == "PullRequest":
         details = fetch_pr_details(repo, number)
+        item["linked_prs"] = []
     else:
         details = fetch_issue_details(repo, number)
+        # Fetch linked PRs for issues - useful for AI summary context
+        item["linked_prs"] = fetch_linked_prs(repo, number)
 
     status, status_color, pending_reviewers = determine_status(item, details)
 

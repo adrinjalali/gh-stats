@@ -186,6 +186,14 @@ When analyzing who needs to act, check the FULL comment/review history, not just
 - Check if reviewers who requested changes have re-reviewed after fixes
 - Example: If reviewer A approved but reviewer B raised major concerns and never re-approved after changes, action_required_by should include B, not A
 
+**IMPORTANT - Issues with linked PRs:**
+When generating summaries for Issues, check for `linked_prs` in the item data:
+- Issues often have most of their discussion happening in linked PRs
+- The `linked_prs` field contains PR references (number, title, state) with their recent reviews and comments
+- Consider the PR conversations when determining the issue's current state and action items
+- If an issue has a linked PR in "MERGED" state, the issue may be resolved or nearly resolved
+- If linked PRs are awaiting review, mention this in the summary
+
 **Report features:**
 - Interactive table with sorting (multi-level, 3-state: unsorted → asc → desc)
 - Filters: Person, Repo, Board status, Status, Needs Action, Search

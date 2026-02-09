@@ -48,6 +48,7 @@ def get_items_for_user(items: list[dict], user: str) -> list[dict]:
 STATUS_CONFIG = {
     # AI status values (preferred when available)
     "Merged": {"emoji": "🟣", "color": "#6f42c1", "priority": 0},
+    "Closed": {"emoji": "⚫", "color": "#57606a", "priority": 0.5},
     "Ready to merge": {"emoji": "✅", "color": "#22863a", "priority": 1},
     "Needs second review or ready to merge": {
         "emoji": "🔷",
@@ -127,11 +128,11 @@ def generate_html_report(users: list[str] | None = None) -> str:
         seen_items.add(item_key)
 
         # Use AI status when available, fall back to computed status
-        # Always prioritize "Merged" computed status over AI status
+        # Always prioritize "Merged" or "Closed" computed status over AI status
         ai_status = item.get("ai_status", "")
         computed_status = item.get("computed_status", "Unknown")
-        if computed_status == "Merged":
-            status_key = "Merged"
+        if computed_status in ("Merged", "Closed"):
+            status_key = computed_status
         elif ai_status and ai_status in STATUS_CONFIG:
             status_key = ai_status
         else:
@@ -185,6 +186,9 @@ def generate_html_report(users: list[str] | None = None) -> str:
                 "status_color": config["color"],
                 "status_priority": config["priority"],
                 "author": item.get("author", ""),
+                "state": item.get("state", ""),
+                "repo": item.get("repo", ""),
+                "number": item.get("number", ""),
                 "created": item.get("created_at", ""),
                 "updated": item.get("updated_at", ""),
                 "summary": item.get("summary", ""),
@@ -374,8 +378,14 @@ def generate_html_report(users: list[str] | None = None) -> str:
             vertical-align: middle;
             margin-right: 4px;
         }}
-        .type-icon.pr {{ color: #8250df; }}
-        .type-icon.issue {{ color: #1a7f37; }}
+        /* GitHub colorblind theme colors */
+        /* PRs: open=grey, merged=purple, closed=red */
+        .type-icon.pr {{ color: #57606a; }}
+        .type-icon.pr.merged {{ color: #8250df; }}
+        .type-icon.pr.closed {{ color: #cf222e; }}
+        /* Issues: open=grey, closed=purple */
+        .type-icon.issue {{ color: #57606a; }}
+        .type-icon.issue.closed {{ color: #8250df; }}
         .status {{
             display: inline-flex;
             align-items: center;
@@ -652,6 +662,55 @@ def generate_html_report(users: list[str] | None = None) -> str:
             font-size: 13px;
             color: #24292e;
         }}
+        .copy-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            border: 1px solid #d0d7de;
+            border-radius: 4px;
+            background: #f6f8fa;
+            color: #24292e;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+        .copy-btn:hover {{
+            background: #e1e4e8;
+        }}
+        .copy-btn.copied {{
+            background: #ddf4ff;
+            border-color: #0969da;
+            color: #0969da;
+        }}
+        .copy-btn svg {{
+            width: 12px;
+            height: 12px;
+        }}
+        .add-to-board {{
+            margin-top: 10px;
+            padding: 8px 12px;
+            background: #f6f8fa;
+            border: 1px dashed #d0d7de;
+            border-radius: 4px;
+        }}
+        .add-to-board-title {{
+            font-size: 12px;
+            font-weight: 500;
+            color: #57606a;
+            margin-bottom: 6px;
+        }}
+        .add-to-board code {{
+            display: block;
+            padding: 6px 8px;
+            background: #24292e;
+            color: #f6f8fa;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            overflow-x: auto;
+            white-space: nowrap;
+        }}
     </style>
 </head>
 <body>
@@ -819,7 +878,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
 
             tbody.innerHTML = filtered.map((r, idx) => `
                 <tr class="expandable" data-idx="${{idx}}">
-                    <td><span class="expand-arrow">▶</span> ${{getTypeIcon(r.type)}} <a class="link" href="${{r.url}}" target="_blank">${{r.item}}</a></td>
+                    <td><span class="expand-arrow">▶</span> ${{getTypeIcon(r.type, r.state)}} <a class="link" href="${{r.url}}" target="_blank">${{r.item}}</a></td>
                     <td><a class="link" href="${{r.url}}" target="_blank">${{escapeHtml(r.title)}}</a></td>
                     <td class="assigned">${{formatAssigned(r)}}</td>
                     <td class="assigned">${{formatNeedsAction(r)}}</td>
@@ -857,11 +916,35 @@ def generate_html_report(users: list[str] | None = None) -> str:
             return div.innerHTML;
         }}
 
-        function getTypeIcon(type) {{
+        function copyToClipboard(btn, text) {{
+            navigator.clipboard.writeText(text).then(() => {{
+                btn.classList.add('copied');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>Copied!';
+                setTimeout(() => {{
+                    btn.classList.remove('copied');
+                    btn.innerHTML = originalText;
+                }}, 2000);
+            }}).catch(err => {{
+                console.error('Failed to copy:', err);
+                alert('Failed to copy to clipboard');
+            }});
+        }}
+
+        function getTypeIcon(type, state) {{
+            // Determine state class for colorblind-friendly coloring
+            let stateClass = '';
+            if (state) {{
+                const s = state.toUpperCase();
+                if (s === 'MERGED') stateClass = ' merged';
+                else if (s === 'CLOSED') stateClass = ' closed';
+                // OPEN items use the default color (no extra class)
+            }}
+
             if (type === 'PullRequest') {{
-                return '<svg class="type-icon pr" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"></path></svg>';
+                return '<svg class="type-icon pr' + stateClass + '" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"></path></svg>';
             }} else {{
-                return '<svg class="type-icon issue" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"></path><path fill="currentColor" d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"></path></svg>';
+                return '<svg class="type-icon issue' + stateClass + '" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"></path><path fill="currentColor" d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"></path></svg>';
             }}
         }}
 
@@ -941,7 +1024,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
         }}
 
         function formatSummaryContent(r) {{
-            if (!r.summary && !r.ai_status && (!r.action_items || r.action_items.length === 0)) {{
+            if (!r.summary && !r.ai_status && (!r.action_items || r.action_items.length === 0) && r.is_board_item) {{
                 return '<div class="summary-text"><span class="no-summary">No summary available. Run export_user_items.py to generate.</span></div>';
             }}
 
@@ -975,6 +1058,19 @@ def generate_html_report(users: list[str] | None = None) -> str:
                     html += `<li>${{escapeHtml(item)}}</li>`;
                 }});
                 html += '</ul></div>';
+            }}
+
+            // Add to board command for items not on the board
+            if (!r.is_board_item && r.url) {{
+                const ghCmd = `gh project item-add 8 --owner probabl-ai --url ${{r.url}}`;
+                html += `<div class="add-to-board">`;
+                html += `<div class="add-to-board-title">Add to board:</div>`;
+                html += `<code>${{escapeHtml(ghCmd)}}</code>`;
+                html += `<button class="copy-btn" onclick="copyToClipboard(this, '${{escapeHtml(ghCmd).replace(/'/g, "\\'")}}')" style="margin-top: 6px;">`;
+                html += `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg>`;
+                html += `Copy command`;
+                html += `</button>`;
+                html += `</div>`;
             }}
 
             return html;
