@@ -61,6 +61,7 @@ def fetch_board_items(
                 "type": content.get("type", ""),
                 "url": content.get("url", ""),
                 "board_status": status,
+                "priority": item.get("priority") or "",
                 "champion": item.get("champion") or "",
                 "reviewer1": item.get("reviewer 1") or "",
                 "reviewer2": item.get("reviewer 2") or "",

@@ -178,6 +178,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
                 "reviewer2": reviewer2,
                 "other_contributors": other_contributors,
                 "board_status": item.get("board_status", ""),
+                "priority": item.get("priority", ""),
                 "is_board_item": is_board_item,
                 "involved_users": involved_users,
                 "interaction_types": interaction_types,
@@ -852,8 +853,8 @@ def generate_html_report(users: list[str] | None = None) -> str:
                         bVal = (b.action_required_by || []).join(',').toLowerCase();
                     }} else if (col === 'board_status') {{
                         // Sort high priority first, then alphabetically
-                        const aHigh = a.board_status.toLowerCase().includes('high priority') ? 0 : 1;
-                        const bHigh = b.board_status.toLowerCase().includes('high priority') ? 0 : 1;
+                        const aHigh = (a.priority || '').toLowerCase() === 'high' ? 0 : 1;
+                        const bHigh = (b.priority || '').toLowerCase() === 'high' ? 0 : 1;
                         if (aHigh !== bHigh) {{
                             aVal = aHigh;
                             bVal = bHigh;
@@ -882,7 +883,7 @@ def generate_html_report(users: list[str] | None = None) -> str:
                     <td><a class="link" href="${{r.url}}" target="_blank">${{escapeHtml(r.title)}}</a></td>
                     <td class="assigned">${{formatAssigned(r)}}</td>
                     <td class="assigned">${{formatNeedsAction(r)}}</td>
-                    <td><span class="board-badge ${{getBoardBadgeClass(r.board_status)}}">${{r.board_status}}</span></td>
+                    <td><span class="board-badge ${{getBoardBadgeClass(r.board_status, r.priority)}}">${{r.board_status}}${{r.priority ? ' (' + r.priority + ')' : ''}}</span></td>
                     <td><span class="status" style="background: ${{r.status_color}}20; color: ${{r.status_color}}">${{r.status_emoji}} ${{r.status}}</span></td>
                     <td>${{r.author}}</td>
                     <td>${{formatAge(r.created)}}</td>
@@ -1000,11 +1001,11 @@ def generate_html_report(users: list[str] | None = None) -> str:
             return r.action_required_by.map(p => `<span class="badge needs-action">${{p}}</span>`).join(' ');
         }}
 
-        function getBoardBadgeClass(status) {{
+        function getBoardBadgeClass(status, priority) {{
             if (!status) return '';
             const s = status.toLowerCase();
-            if (s.includes('high priority')) return 'high-priority';
             if (s === 'not included') return 'not-included';
+            if (priority && priority.toLowerCase() === 'high') return 'high-priority';
             return '';
         }}
 
